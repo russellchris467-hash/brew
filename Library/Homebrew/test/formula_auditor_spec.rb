@@ -971,6 +971,108 @@ RSpec.describe Homebrew::FormulaAuditor do
     end
   end
 
+  describe "#audit_keras_backend" do
+    it "reports a problem when Keras resource is present without a backend" do
+      fa = formula_auditor "foo", <<~RUBY
+        class Foo < Formula
+          url "https://brew.sh/foo-1.0.tgz"
+          homepage "https://brew.sh"
+
+          resource "keras" do
+            url "https://files.pythonhosted.org/packages/keras-3.0.0.tar.gz"
+            sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+          end
+        end
+      RUBY
+
+      fa.audit_keras_backend
+      expect(fa.problems.first[:message]).to match(/Keras 3\.x requires a backend framework/)
+    end
+
+    it "does not report a problem when Keras has TensorFlow backend" do
+      fa = formula_auditor "foo", <<~RUBY
+        class Foo < Formula
+          url "https://brew.sh/foo-1.0.tgz"
+          homepage "https://brew.sh"
+
+          resource "keras" do
+            url "https://files.pythonhosted.org/packages/keras-3.0.0.tar.gz"
+            sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+          end
+
+          resource "tensorflow" do
+            url "https://files.pythonhosted.org/packages/tensorflow-2.0.0.tar.gz"
+            sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+          end
+        end
+      RUBY
+
+      fa.audit_keras_backend
+      expect(fa.problems).to be_empty
+    end
+
+    it "does not report a problem when Keras has PyTorch backend" do
+      fa = formula_auditor "foo", <<~RUBY
+        class Foo < Formula
+          url "https://brew.sh/foo-1.0.tgz"
+          homepage "https://brew.sh"
+
+          resource "keras" do
+            url "https://files.pythonhosted.org/packages/keras-3.0.0.tar.gz"
+            sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+          end
+
+          resource "pytorch" do
+            url "https://files.pythonhosted.org/packages/pytorch-2.0.0.tar.gz"
+            sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+          end
+        end
+      RUBY
+
+      fa.audit_keras_backend
+      expect(fa.problems).to be_empty
+    end
+
+    it "does not report a problem when Keras has JAX backend" do
+      fa = formula_auditor "foo", <<~RUBY
+        class Foo < Formula
+          url "https://brew.sh/foo-1.0.tgz"
+          homepage "https://brew.sh"
+
+          resource "keras" do
+            url "https://files.pythonhosted.org/packages/keras-3.0.0.tar.gz"
+            sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+          end
+
+          resource "jax" do
+            url "https://files.pythonhosted.org/packages/jax-0.4.0.tar.gz"
+            sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+          end
+        end
+      RUBY
+
+      fa.audit_keras_backend
+      expect(fa.problems).to be_empty
+    end
+
+    it "does not report a problem when formula has no Keras resource" do
+      fa = formula_auditor "foo", <<~RUBY
+        class Foo < Formula
+          url "https://brew.sh/foo-1.0.tgz"
+          homepage "https://brew.sh"
+
+          resource "numpy" do
+            url "https://files.pythonhosted.org/packages/numpy-1.0.0.tar.gz"
+            sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+          end
+        end
+      RUBY
+
+      fa.audit_keras_backend
+      expect(fa.problems).to be_empty
+    end
+  end
+
   describe "#audit_stable_version" do
     subject do
       fa = described_class.new(Formulary.factory(formula_path), git: true)

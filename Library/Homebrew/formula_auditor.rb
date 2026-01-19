@@ -448,6 +448,34 @@ module Homebrew
       EOS
     end
 
+    def audit_keras_backend
+      # Keras 3.x requires a backend (TensorFlow, PyTorch, or JAX)
+      # Check if formulas that depend on Keras also specify a backend
+      @specs.each do |spec|
+        has_keras = false
+        has_backend = false
+
+        # Check resources for Keras
+        spec.resources.each do |resource|
+          resource_name = resource.name.downcase
+          has_keras = true if resource_name == "keras"
+
+          # Check for backend resources
+          has_backend = true if %w[tensorflow pytorch torch jax].include?(resource_name)
+        end
+
+        # If Keras is present but no backend, warn
+        if has_keras && !has_backend
+          problem <<~EOS
+            Keras 3.x requires a backend framework. Please add a resource dependency for one of:
+              - tensorflow (recommended for most use cases)
+              - pytorch (or torch)
+              - jax
+          EOS
+        end
+      end
+    end
+
     def audit_conflicts
       tap = formula.tap
       formula.conflicts.each do |conflict|
