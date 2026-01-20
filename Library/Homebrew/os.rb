@@ -72,7 +72,12 @@ module OS
     PATH_OPEN = if OS::Linux.wsl? && (wslview = which("wslview").presence)
       wslview.to_s
     else
-      "xdg-open"
+      # Find available browser/opener tool for minimal Linux distributions like Alpine
+      # that may not have xdg-open installed by default
+      browser = %w[xdg-open firefox chromium chromium-browser google-chrome].find do |cmd|
+        which(cmd)
+      end
+      browser || "xdg-open"
     end.freeze
   end
 
