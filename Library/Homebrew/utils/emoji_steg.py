@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import re
 import sys
 
 
@@ -217,6 +218,104 @@ def detect(text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Hydra output parser
+# Parses credential lines from Hydra stdout and encodes each into emoji.
+#
+# Hydra success lines look like:
+#   [22][ssh] host: 192.168.1.10   login: admin   password: secret123
+#   [80][http-get] host: 10.0.0.1   login: root   password: toor
+# ---------------------------------------------------------------------------
+
+# Matches Hydra credential lines:  [port][service] host: H  login: L  password: P
+HYDRA_CRED_RE = re.compile(
+    r"\[(\d+)\]\[([^\]]+)\]\s+"
+    r"host:\s*(\S+)\s+"
+    r"login:\s*(\S+)\s+"
+    r"password:\s*(\S*)",
+)
+
+# Service -> emoji mapping for carrier variety
+SERVICE_EMOJI = {
+    "ssh":       "\U0001F5A5\U0001F510",   # desktop + lock
+    "ftp":       "\U0001F4C2\U0001F511",   # folder + key
+    "http-get":  "\U0001F310\U0001F513",   # globe + unlocked
+    "http-post": "\U0001F310\U0001F4E8",   # globe + envelope
+    "rdp":       "\U0001F5A5\U0001F6AA",   # desktop + door
+    "smb":       "\U0001F4C1\U0001F50F",   # folder + lock-pen
+    "mysql":     "\U0001F4BE\U0001F511",   # floppy + key
+    "postgres":  "\U0001F418\U0001F511",   # elephant + key
+    "vnc":       "\U0001F4F1\U0001F50D",   # phone + magnifier
+    "telnet":    "\U0001F4DF\U0001F513",   # pager + unlocked
+    "smtp":      "\U0001F4E7\U0001F511",   # email + key
+    "pop3":      "\U0001F4EC\U0001F511",   # mailbox + key
+    "imap":      "\U0001F4E5\U0001F511",   # inbox + key
+}
+
+DEFAULT_SERVICE_EMOJI = "\U0001F510\U0001F511"  # lock + key
+
+
+def parse_hydra_output(text: str) -> list:
+    """Extract credentials from Hydra output text.
+
+    Returns a list of dicts with keys: port, service, host, login, password.
+    """
+    creds = []
+    for line in text.splitlines():
+        m = HYDRA_CRED_RE.search(line)
+        if m:
+            creds.append({
+                "port":     m.group(1),
+                "service":  m.group(2),
+                "host":     m.group(3),
+                "login":    m.group(4),
+                "password": m.group(5),
+            })
+    return creds
+
+
+def hydra_encode(text: str, method: str, carrier: str | None) -> list:
+    """Parse Hydra output and encode each credential as an emoji-steg string.
+
+    Returns a list of (summary, encoded_string) tuples.
+    """
+    creds = parse_hydra_output(text)
+    if not creds:
+        raise ValueError("No Hydra credentials found in input. "
+                         "Expected lines like: [22][ssh] host: x  login: y  password: z")
+
+    encode_fn = METHODS[method][0]
+    results = []
+
+    for cred in creds:
+        secret = f"{cred['host']}:{cred['port']} {cred['login']}:{cred['password']}"
+        if carrier:
+            emoji_carrier = carrier
+        else:
+            emoji_carrier = SERVICE_EMOJI.get(cred["service"], DEFAULT_SERVICE_EMOJI)
+        encoded = encode_fn(secret, emoji_carrier)
+        summary = f"[{cred['service']}] {cred['host']}:{cred['port']}"
+        results.append((summary, encoded))
+
+    return results
+
+
+def hydra_decode(text: str, method: str) -> list:
+    """Decode emoji-steg strings (one per line) back to credential format."""
+    decode_fn = METHODS[method][1]
+    results = []
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            decoded = decode_fn(line)
+            results.append(decoded)
+        except ValueError:
+            continue
+    return results
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -240,15 +339,17 @@ methods:
   tag   Tag sequences       - 1 tag char per ASCII byte
 
 examples:
-  %(prog)s encode -m vs  -t "flag{hidden}"
-  %(prog)s encode -m vs  -t "flag{hidden}" -c "🎉🎊🎈"
-  %(prog)s decode -m vs  -t "<encoded string>"
-  %(prog)s detect        -t "<suspicious string>"
-  %(prog)s encode -m zw  -t "secret" | %(prog)s decode -m zw --stdin
+  %(prog)s encode  -m vs  -t "flag{hidden}"
+  %(prog)s encode  -m vs  -t "flag{hidden}" -c "🎉🎊🎈"
+  %(prog)s decode  -m vs  -t "<encoded string>"
+  %(prog)s detect         -t "<suspicious string>"
+  %(prog)s hydra   -m vs  --stdin < hydra_output.txt
+  %(prog)s hydra   -m vs  -t "[22][ssh] host: 10.0.0.1   login: admin   password: pass"
+  %(prog)s hydra-decode -m vs --stdin < encoded_creds.txt
         """,
     )
 
-    parser.add_argument("action", choices=["encode", "decode", "detect"],
+    parser.add_argument("action", choices=["encode", "decode", "detect", "hydra", "hydra-decode"],
                         help="Action to perform")
     parser.add_argument("-m", "--method", choices=list(METHODS.keys()), default="vs",
                         help="Steganography method (default: vs)")
@@ -284,6 +385,36 @@ examples:
                         print(f"      {kk}: {vv}")
                 else:
                     print(f"    {k}: {v}")
+            print()
+        return
+
+    if args.action == "hydra":
+        results = hydra_encode(text, args.method, args.carrier if args.carrier != DEFAULT_CARRIER else None)
+        print(f"Encoded {len(results)} credential(s):\n")
+        for summary, encoded in results:
+            print(f"  {summary}")
+            print(f"    {encoded}")
+            print()
+        # Also print just the encoded strings for piping
+        print("--- raw (one per line, for piping to hydra-decode) ---")
+        for _, encoded in results:
+            print(encoded)
+        return
+
+    if args.action == "hydra-decode":
+        results = hydra_decode(text, args.method)
+        if not results:
+            print("No encoded credentials found in input.")
+            return
+        print(f"Decoded {len(results)} credential(s):\n")
+        for cred in results:
+            parts = cred.split(" ", 1)
+            if len(parts) == 2:
+                host_port, login_pass = parts
+                print(f"  host:port  = {host_port}")
+                print(f"  login:pass = {login_pass}")
+            else:
+                print(f"  {cred}")
             print()
         return
 
