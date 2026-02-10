@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""
+hydra - Emoji Smuggling Toolkit CLI
+=====================================
+Educational tool for understanding emoji-based steganography.
+
+Usage:
+  hydra encode   <method> <message> [options]
+  hydra decode   <method> <input>   [options]
+  hydra scan     <input>  [--verbose]
+  hydra hexdump  <input>
+  hydra codepoints <input>
+  hydra demo
+
+Methods: zwc, vs, cipher, regional
+
+FOR EDUCATIONAL AND AUTHORIZED SECURITY TESTING ONLY.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import os
+
+# Add lib to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from lib.zwc_smuggler import ZWCSmuggler
+from lib.variation_steg import VariationSteg
+from lib.emoji_cipher import EmojiCipher
+from lib.regional_encoder import RegionalEncoder
+from lib.detector import Detector
+
+
+BANNER = r"""
+  _   _           _
+ | | | |_   _  __| |_ __ __ _
+ | |_| | | | |/ _` | '__/ _` |
+ |  _  | |_| | (_| | | | (_| |
+ |_| |_|\__, |\__,_|_|  \__,_|
+        |___/
+  Emoji Smuggling Toolkit
+  [Educational Use Only]
+"""
+
+
+def cmd_encode(args):
+    """Encode a secret message using the specified method."""
+    method = args.method.lower()
+    message = args.message
+
+    if method == 'zwc':
+        result = ZWCSmuggler.encode(message, cover_emojis=args.cover)
+    elif method == 'vs':
+        result = VariationSteg.encode(message, cover_emojis=args.cover)
+    elif method == 'cipher':
+        cipher = EmojiCipher(key=args.key)
+        result = cipher.encode(message, noise_ratio=args.noise)
+    elif method == 'regional':
+        result = RegionalEncoder.encode(message)
+    else:
+        print(f"Unknown method: {method}", file=sys.stderr)
+        print("Available: zwc, vs, cipher, regional", file=sys.stderr)
+        sys.exit(1)
+
+    print(result)
+
+    if args.stats:
+        print(f"\n--- Stats ---", file=sys.stderr)
+        print(f"Method:         {method}", file=sys.stderr)
+        print(f"Input length:   {len(message)} chars", file=sys.stderr)
+        print(f"Output length:  {len(result)} chars", file=sys.stderr)
+        print(f"Visible chars:  {sum(1 for c in result if ord(c) >= 32 and c not in chr(0x200b)+chr(0x200c)+chr(0x200d)+chr(0xfeff))}", file=sys.stderr)
+
+
+def cmd_decode(args):
+    """Decode a smuggled message."""
+    method = args.method.lower()
+    smuggled = args.input
+
+    try:
+        if method == 'zwc':
+            result = ZWCSmuggler.decode(smuggled)
+        elif method == 'vs':
+            result = VariationSteg.decode(smuggled)
+        elif method == 'cipher':
+            cipher = EmojiCipher(key=args.key)
+            result = cipher.decode(smuggled)
+        elif method == 'regional':
+            result = RegionalEncoder.decode(smuggled)
+        else:
+            print(f"Unknown method: {method}", file=sys.stderr)
+            sys.exit(1)
+
+        print(result)
+
+    except (ValueError, UnicodeDecodeError) as e:
+        print(f"Decode error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_scan(args):
+    """Scan text for hidden payloads (defensive tool)."""
+    detector = Detector()
+    results = detector.scan(args.input, verbose=args.verbose)
+
+    print(json.dumps(results, indent=2, ensure_ascii=False))
+
+    # Summary line
+    n = len(results['methods_detected'])
+    level = results['threat_level']
+    if n == 0:
+        print(f"\n[{level}] No steganography detected.", file=sys.stderr)
+    else:
+        print(f"\n[{level}] Detected {n} potential method(s):", file=sys.stderr)
+        for m in results['methods_detected']:
+            print(f"  - {m}", file=sys.stderr)
+
+
+def cmd_hexdump(args):
+    """Show hex dump of input to reveal hidden characters."""
+    detector = Detector()
+    print(detector.hexdump(args.input))
+
+
+def cmd_codepoints(args):
+    """Show Unicode codepoint breakdown of each character."""
+    detector = Detector()
+    print(detector.codepoint_dump(args.input))
+
+
+def cmd_demo(_args):
+    """Run an interactive demo of all four methods."""
+    secret = "Hello, Hydra!"
+
+    print(BANNER)
+    print(f'Secret message: "{secret}"\n')
+    print("=" * 60)
+
+    # Head 1: ZWC
+    print("\n[Head 1] Zero-Width Character Smuggling")
+    print("-" * 40)
+    encoded_zwc = ZWCSmuggler.encode(secret)
+    decoded_zwc = ZWCSmuggler.decode(encoded_zwc)
+    print(f"  Encoded (looks like): {encoded_zwc}")
+    print(f"  Visible length:       {len(encoded_zwc)} chars")
+    print(f"  ZWC chars hidden:     {sum(1 for c in encoded_zwc if ord(c) < 0x20 or c in chr(0x200b)+chr(0x200c)+chr(0x200d)+chr(0xfeff))}")
+    print(f"  Decoded:              {decoded_zwc}")
+    assert decoded_zwc == secret, "ZWC roundtrip failed!"
+    print("  [PASS] Roundtrip verified")
+
+    # Head 2: Variation Selector
+    print("\n[Head 2] Variation Selector Steganography")
+    print("-" * 40)
+    encoded_vs = VariationSteg.encode(secret)
+    decoded_vs = VariationSteg.decode(encoded_vs)
+    print(f"  Encoded (looks like): {encoded_vs}")
+    print(f"  Decoded:              {decoded_vs}")
+    assert decoded_vs == secret, "VS roundtrip failed!"
+    print("  [PASS] Roundtrip verified")
+
+    # Head 3: Emoji Cipher
+    print("\n[Head 3] Emoji Substitution Cipher (key=42)")
+    print("-" * 40)
+    cipher = EmojiCipher(key=42)
+    encoded_ec = cipher.encode(secret)
+    decoded_ec = cipher.decode(encoded_ec)
+    print(f"  Encoded: {encoded_ec}")
+    print(f"  Decoded: {decoded_ec}")
+    assert decoded_ec == secret, "Cipher roundtrip failed!"
+    print("  [PASS] Roundtrip verified")
+
+    # Head 4: Regional Indicator
+    print("\n[Head 4] Regional Indicator Encoding")
+    print("-" * 40)
+    encoded_ri = RegionalEncoder.encode(secret)
+    decoded_ri = RegionalEncoder.decode(encoded_ri)
+    print(f"  Encoded (flags): {encoded_ri}")
+    print(f"  Decoded:         {decoded_ri}")
+    assert decoded_ri == secret, "Regional roundtrip failed!"
+    print("  [PASS] Roundtrip verified")
+
+    # Defensive scan
+    print("\n" + "=" * 60)
+    print("\n[Detector] Scanning ZWC-encoded message...")
+    print("-" * 40)
+    detector = Detector()
+    scan = detector.scan(encoded_zwc, verbose=True)
+    print(json.dumps(scan, indent=2, ensure_ascii=False))
+
+    print("\n[Detector] Codepoint dump (first 20 chars of ZWC message):")
+    print("-" * 40)
+    print(detector.codepoint_dump(encoded_zwc[:20]))
+
+    print("\n" + "=" * 60)
+    print("Demo complete. All four heads operational.")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Hydra Emoji Smuggling Toolkit (Educational)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=BANNER,
+    )
+    subparsers = parser.add_subparsers(dest='command', help='Command')
+
+    # encode
+    p_enc = subparsers.add_parser('encode', help='Encode a secret message')
+    p_enc.add_argument('method', choices=['zwc', 'vs', 'cipher', 'regional'])
+    p_enc.add_argument('message', help='Secret message to encode')
+    p_enc.add_argument('--cover', help='Cover emoji string (for zwc/vs)')
+    p_enc.add_argument('--key', type=int, default=42, help='Cipher key (for cipher method)')
+    p_enc.add_argument('--noise', type=float, default=0.0, help='Noise ratio (for cipher)')
+    p_enc.add_argument('--stats', action='store_true', help='Show encoding stats')
+    p_enc.set_defaults(func=cmd_encode)
+
+    # decode
+    p_dec = subparsers.add_parser('decode', help='Decode a smuggled message')
+    p_dec.add_argument('method', choices=['zwc', 'vs', 'cipher', 'regional'])
+    p_dec.add_argument('input', help='Smuggled text to decode')
+    p_dec.add_argument('--key', type=int, default=42, help='Cipher key (for cipher method)')
+    p_dec.set_defaults(func=cmd_decode)
+
+    # scan
+    p_scan = subparsers.add_parser('scan', help='Scan text for hidden payloads')
+    p_scan.add_argument('input', help='Text to scan')
+    p_scan.add_argument('--verbose', '-v', action='store_true', help='Detailed output')
+    p_scan.set_defaults(func=cmd_scan)
+
+    # hexdump
+    p_hex = subparsers.add_parser('hexdump', help='Hex dump of input')
+    p_hex.add_argument('input', help='Text to dump')
+    p_hex.set_defaults(func=cmd_hexdump)
+
+    # codepoints
+    p_cp = subparsers.add_parser('codepoints', help='Unicode codepoint breakdown')
+    p_cp.add_argument('input', help='Text to analyze')
+    p_cp.set_defaults(func=cmd_codepoints)
+
+    # demo
+    p_demo = subparsers.add_parser('demo', help='Run interactive demo')
+    p_demo.set_defaults(func=cmd_demo)
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+
+    args.func(args)
+
+
+if __name__ == '__main__':
+    main()
