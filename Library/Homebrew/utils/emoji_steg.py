@@ -218,6 +218,183 @@ def detect(text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Analysis: entropy, capacity metrics, and statistical detectability
+# ---------------------------------------------------------------------------
+
+import math
+from collections import Counter
+
+
+def shannon_entropy(data: bytes) -> float:
+    """Calculate Shannon entropy (bits per byte) of raw bytes."""
+    if not data:
+        return 0.0
+    freq = Counter(data)
+    length = len(data)
+    return -sum((c / length) * math.log2(c / length) for c in freq.values())
+
+
+def unicode_category_histogram(text: str) -> dict:
+    """Categorize each codepoint into broad Unicode ranges."""
+    categories = {
+        "ascii_printable": 0,
+        "ascii_control": 0,
+        "variation_selectors": 0,
+        "zero_width": 0,
+        "tag_characters": 0,
+        "emoji": 0,
+        "other_unicode": 0,
+    }
+    for ch in text:
+        cp = ord(ch)
+        if VS_BASE <= cp <= VS_BASE + 15:
+            categories["variation_selectors"] += 1
+        elif ch in ZW_CHARS:
+            categories["zero_width"] += 1
+        elif TAG_BASE < cp <= TAG_CANCEL:
+            categories["tag_characters"] += 1
+        elif 0x1F300 <= cp <= 0x1FAFF or 0x2600 <= cp <= 0x27BF:
+            categories["emoji"] += 1
+        elif 32 <= cp <= 126:
+            categories["ascii_printable"] += 1
+        elif cp < 32 or cp == 127:
+            categories["ascii_control"] += 1
+        else:
+            categories["other_unicode"] += 1
+    return categories
+
+
+def analyze(text: str) -> dict:
+    """Full analysis of a steganographic text: entropy, histogram, capacity."""
+    raw_bytes = text.encode("utf-8")
+    histogram = unicode_category_histogram(text)
+    total_chars = len(text)
+    visible_chars = total_chars - (
+        histogram["variation_selectors"]
+        + histogram["zero_width"]
+        + histogram["tag_characters"]
+    )
+    hidden_chars = total_chars - visible_chars
+    hidden_ratio = hidden_chars / total_chars if total_chars else 0.0
+
+    return {
+        "total_codepoints": total_chars,
+        "total_utf8_bytes": len(raw_bytes),
+        "visible_codepoints": visible_chars,
+        "hidden_codepoints": hidden_chars,
+        "hidden_ratio": round(hidden_ratio, 4),
+        "entropy_bits_per_byte": round(shannon_entropy(raw_bytes), 4),
+        "max_entropy": 8.0,
+        "histogram": histogram,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Benchmark: compare all three methods on capacity, overhead, detectability
+# ---------------------------------------------------------------------------
+
+def benchmark(secret: str, carrier: str) -> dict:
+    """Encode the same secret with all methods and compare metrics."""
+    results = {}
+    secret_bytes = len(secret.encode("utf-8"))
+
+    for name, (enc_fn, dec_fn, desc) in METHODS.items():
+        encoded = enc_fn(secret, carrier)
+        decoded = dec_fn(encoded)
+        correct = decoded == secret
+
+        encoded_bytes = len(encoded.encode("utf-8"))
+        carrier_bytes = len(carrier.encode("utf-8"))
+        overhead_bytes = encoded_bytes - carrier_bytes
+        analysis = analyze(encoded)
+
+        results[name] = {
+            "description": desc,
+            "roundtrip_ok": correct,
+            "secret_bytes": secret_bytes,
+            "carrier_utf8_bytes": carrier_bytes,
+            "encoded_utf8_bytes": encoded_bytes,
+            "overhead_bytes": overhead_bytes,
+            "overhead_ratio": round(overhead_bytes / carrier_bytes, 2) if carrier_bytes else 0,
+            "bytes_per_secret_byte": round(overhead_bytes / secret_bytes, 2) if secret_bytes else 0,
+            "hidden_codepoints": analysis["hidden_codepoints"],
+            "hidden_ratio": analysis["hidden_ratio"],
+            "entropy": analysis["entropy_bits_per_byte"],
+        }
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Sanitize: defensive countermeasures to strip steganographic content
+# ---------------------------------------------------------------------------
+
+# All Unicode ranges used for steganographic hiding
+STEG_RANGES = [
+    (0xFE00, 0xFE0F),     # Variation Selectors
+    (0xFE20, 0xFE2F),     # Combining Half Marks (sometimes abused)
+    (0x200B, 0x200F),     # Zero-width and directional chars
+    (0x2028, 0x202F),     # Line/paragraph separators, embedding controls
+    (0x2060, 0x2064),     # Word joiner, invisible operators
+    (0x2066, 0x206F),     # Bidi isolates and overrides
+    (0xE0001, 0xE007F),   # Tag characters
+    (0xE0100, 0xE01EF),   # Variation Selectors Supplement
+    (0xFFF0, 0xFFFF),     # Specials (interlinear annotation, replacement)
+]
+
+
+def is_steg_char(cp: int) -> bool:
+    """Check if a codepoint falls within known steganographic ranges."""
+    return any(lo <= cp <= hi for lo, hi in STEG_RANGES)
+
+
+def sanitize(text: str, report: bool = False) -> dict:
+    """Strip all known steganographic/invisible Unicode from text.
+
+    Returns a dict with 'clean' text and optionally a 'removed' report.
+    """
+    clean = []
+    removed = []
+    for i, ch in enumerate(text):
+        cp = ord(ch)
+        if is_steg_char(cp):
+            removed.append({
+                "index": i,
+                "codepoint": f"U+{cp:04X}",
+                "name": _cp_name(cp),
+            })
+        else:
+            clean.append(ch)
+
+    result = {"clean": "".join(clean), "removed_count": len(removed)}
+    if report:
+        result["removed"] = removed
+    return result
+
+
+def _cp_name(cp: int) -> str:
+    """Best-effort name for a codepoint."""
+    if VS_BASE <= cp <= VS_BASE + 15:
+        return f"VS{cp - VS_BASE + 1}"
+    if cp == 0x200B:
+        return "ZWSP"
+    if cp == 0x200C:
+        return "ZWNJ"
+    if cp == 0x200D:
+        return "ZWJ"
+    if cp == 0x2060:
+        return "WJ"
+    if 0xE0001 <= cp <= 0xE007F:
+        mapped = cp - 0xE0000
+        if 0x20 <= mapped <= 0x7E:
+            return f"TAG '{chr(mapped)}'"
+        return f"TAG 0x{mapped:02X}"
+    if 0xE0100 <= cp <= 0xE01EF:
+        return f"VS{cp - 0xE0100 + 17}"
+    return f"U+{cp:04X}"
+
+
+# ---------------------------------------------------------------------------
 # Hydra output parser
 # Parses credential lines from Hydra stdout and encodes each into emoji.
 #
@@ -338,18 +515,32 @@ methods:
   zw    Zero-width chars    - 8 bits per byte + separators
   tag   Tag sequences       - 1 tag char per ASCII byte
 
+actions:
+  encode        Encode a secret into an emoji carrier
+  decode        Decode a hidden message from steg text
+  detect        Scan text for hidden steganographic content
+  analyze       Entropy, histogram, and capacity metrics
+  benchmark     Compare all methods on the same secret
+  sanitize      Strip all hidden Unicode (defensive)
+  hydra         Parse Hydra output and encode credentials
+  hydra-decode  Decode emoji-encoded credentials
+
 examples:
-  %(prog)s encode  -m vs  -t "flag{hidden}"
-  %(prog)s encode  -m vs  -t "flag{hidden}" -c "🎉🎊🎈"
-  %(prog)s decode  -m vs  -t "<encoded string>"
-  %(prog)s detect         -t "<suspicious string>"
-  %(prog)s hydra   -m vs  --stdin < hydra_output.txt
-  %(prog)s hydra   -m vs  -t "[22][ssh] host: 10.0.0.1   login: admin   password: pass"
+  %(prog)s encode    -m vs  -t "flag{hidden}"
+  %(prog)s decode    -m vs  -t "<encoded string>"
+  %(prog)s detect           -t "<suspicious string>"
+  %(prog)s analyze          -t "<steg string>"
+  %(prog)s benchmark -m vs  -t "test payload"
+  %(prog)s sanitize         -t "<dirty string>"
+  %(prog)s hydra     -m vs  --stdin < hydra_output.txt
   %(prog)s hydra-decode -m vs --stdin < encoded_creds.txt
         """,
     )
 
-    parser.add_argument("action", choices=["encode", "decode", "detect", "hydra", "hydra-decode"],
+    parser.add_argument("action", choices=[
+                            "encode", "decode", "detect", "analyze",
+                            "benchmark", "sanitize", "hydra", "hydra-decode",
+                        ],
                         help="Action to perform")
     parser.add_argument("-m", "--method", choices=list(METHODS.keys()), default="vs",
                         help="Steganography method (default: vs)")
@@ -386,6 +577,85 @@ examples:
                 else:
                     print(f"    {k}: {v}")
             print()
+        return
+
+    if args.action == "analyze":
+        info = analyze(text)
+        print("Steganographic Analysis")
+        print("=" * 50)
+        print(f"  Total codepoints:    {info['total_codepoints']}")
+        print(f"  Total UTF-8 bytes:   {info['total_utf8_bytes']}")
+        print(f"  Visible codepoints:  {info['visible_codepoints']}")
+        print(f"  Hidden codepoints:   {info['hidden_codepoints']}")
+        print(f"  Hidden ratio:        {info['hidden_ratio']:.1%}")
+        print(f"  Shannon entropy:     {info['entropy_bits_per_byte']:.4f} bits/byte (max 8.0)")
+        print()
+        print("  Unicode Category Histogram:")
+        for cat, count in info["histogram"].items():
+            if count > 0:
+                bar = "#" * min(count, 40)
+                print(f"    {cat:25s} {count:5d}  {bar}")
+        print()
+
+        # Detectability assessment
+        ratio = info["hidden_ratio"]
+        if ratio == 0:
+            verdict = "CLEAN - no hidden characters detected"
+        elif ratio < 0.3:
+            verdict = "LOW  - small amount of hidden content, may pass casual inspection"
+        elif ratio < 0.6:
+            verdict = "MED  - significant hidden content, detectable by Unicode scanners"
+        else:
+            verdict = "HIGH - mostly hidden content, easily flagged by any filter"
+        print(f"  Detectability: {verdict}")
+        return
+
+    if args.action == "benchmark":
+        carrier = args.carrier
+        results = benchmark(text, carrier)
+        print("Method Comparison Benchmark")
+        print("=" * 70)
+        print(f"  Secret:  {text!r} ({len(text.encode('utf-8'))} bytes)")
+        print(f"  Carrier: {carrier} ({len(carrier.encode('utf-8'))} UTF-8 bytes)")
+        print()
+
+        # Table header
+        print(f"  {'Method':<6} {'Overhead':>10} {'B/secret':>10} {'Hidden%':>10} {'Entropy':>10} {'OK':>4}")
+        print(f"  {'-'*6} {'-'*10} {'-'*10} {'-'*10} {'-'*10} {'-'*4}")
+        for name, info in results.items():
+            print(f"  {name:<6} {info['overhead_bytes']:>8} B {info['bytes_per_secret_byte']:>8.1f}x"
+                  f" {info['hidden_ratio']:>9.1%} {info['entropy']:>8.4f}  "
+                  f"{'Y' if info['roundtrip_ok'] else 'N':>3}")
+        print()
+
+        # Recommendations
+        smallest = min(results, key=lambda k: results[k]["overhead_bytes"])
+        stealthiest = min(results, key=lambda k: results[k]["hidden_ratio"])
+        print(f"  Smallest overhead: {smallest} ({results[smallest]['overhead_bytes']} bytes)")
+        print(f"  Lowest hidden ratio: {stealthiest} ({results[stealthiest]['hidden_ratio']:.1%})")
+        print()
+        print("  Notes:")
+        print("    - vs:  Compact, but VS chars cluster unnaturally after emojis")
+        print("    - zw:  Bit-level encoding; higher overhead but uses common chars")
+        print("    - tag: 1:1 for ASCII; tag block is rarely seen in normal text")
+        return
+
+    if args.action == "sanitize":
+        result = sanitize(text, report=True)
+        clean = result["clean"]
+        removed_count = result["removed_count"]
+
+        if removed_count == 0:
+            print("Text is clean. No steganographic characters found.")
+            print(f"\n{text}")
+        else:
+            print(f"Sanitized: removed {removed_count} hidden character(s)")
+            print()
+            print(f"  Clean text: {clean}")
+            print()
+            print("  Removed characters:")
+            for entry in result["removed"]:
+                print(f"    pos {entry['index']:4d}: {entry['codepoint']}  ({entry['name']})")
         return
 
     if args.action == "hydra":
