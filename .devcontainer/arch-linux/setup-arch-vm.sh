@@ -1,27 +1,21 @@
 #!/bin/bash
-# Setup script for Homebrew development with Claude Code on an Arch Linux VM (UTM/QEMU).
+# Setup script for Claude Code on an Arch Linux VM (UTM/QEMU).
 #
 # Usage:
-#   curl -fsSL <raw-url>/setup-arch-vm.sh | bash
-#   # or
 #   bash setup-arch-vm.sh
 #
 # Prerequisites:
-#   - A fresh or existing Arch Linux installation (x86_64 or aarch64)
+#   - Arch Linux installation (x86_64 or aarch64) running in UTM
 #   - Internet connectivity
 #   - A non-root user with sudo privileges
 #
 # What this script does:
-#   1. Installs system dependencies required by Homebrew
-#   2. Installs Homebrew itself
-#   3. Installs development gems and tooling
-#   4. Configures shell environment (bash/zsh)
-#   5. Installs Claude Code (Node.js + npm)
-#   6. Verifies the setup
+#   1. Updates system and installs core dependencies
+#   2. Installs Node.js (required by Claude Code)
+#   3. Installs Claude Code via npm
+#   4. Installs UTM/QEMU guest agents (clipboard sharing, display resize)
+#   5. Verifies the setup
 set -euo pipefail
-
-readonly HOMEBREW_PREFIX="/home/linuxbrew/.linuxbrew"
-readonly SCRIPT_NAME="$(basename "$0")"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -41,118 +35,59 @@ if ! command_exists pacman; then
   error "This script is intended for Arch Linux (pacman not found)."
 fi
 
-# ── 1. System dependencies ───────────────────────────────────────────────────
+# ── 1. System update and core packages ───────────────────────────────────────
 
-info "Installing Arch Linux system dependencies..."
+info "Updating system and installing core packages..."
 
 sudo pacman -Syu --noconfirm
 
 sudo pacman -S --noconfirm --needed \
   base-devel \
-  procps-ng \
   curl \
-  file \
   git \
   openssh \
-  sudo \
   ca-certificates \
   jq \
   less \
   unzip \
-  which \
-  zsh
+  which
 
-# ── 2. Install Node.js (needed for Claude Code) ─────────────────────────────
+# ── 2. Install Node.js (required by Claude Code) ────────────────────────────
 
-if ! command_exists node; then
-  info "Installing Node.js..."
-  sudo pacman -S --noconfirm --needed nodejs npm
-fi
+info "Installing Node.js and npm..."
+sudo pacman -S --noconfirm --needed nodejs npm
 
 node_major="$(node --version | sed 's/^v//' | cut -d. -f1)"
 if [[ "$node_major" -lt 18 ]]; then
-  warn "Node.js version $(node --version) is older than v18. Claude Code requires Node.js >= 18."
-  warn "Consider installing a newer version via nvm or pacman."
+  warn "Node.js $(node --version) is below v18. Claude Code needs >= 18."
+  warn "Install a newer version: sudo pacman -S nodejs-lts-iron"
 fi
 
-# ── 3. Install Homebrew ──────────────────────────────────────────────────────
-
-if ! command_exists brew; then
-  info "Installing Homebrew..."
-  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-else
-  info "Homebrew already installed, updating..."
-  brew update
-fi
-
-# Configure shell environment for Homebrew
-configure_shell() {
-  local rcfile="$1"
-  local shellenv_line='eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"'
-
-  if [[ -f "$rcfile" ]] && grep -qF "brew shellenv" "$rcfile"; then
-    return 0
-  fi
-
-  info "Adding Homebrew to ${rcfile}..."
-  {
-    echo ""
-    echo "# Homebrew"
-    echo "$shellenv_line"
-  } >> "$rcfile"
-}
-
-configure_shell "${HOME}/.bashrc"
-[[ -f "${HOME}/.zshrc" || "$SHELL" == */zsh ]] && configure_shell "${HOME}/.zshrc"
-
-# Source Homebrew for the rest of this script
-eval "$("${HOMEBREW_PREFIX}/bin/brew" shellenv)"
-
-# ── 4. Clone and set up the Homebrew/brew source for development ─────────────
-
-info "Setting up Homebrew/brew development checkout..."
-
-BREW_REPO="$(brew --repository)"
-
-# Ensure we are on a development-ready checkout
-if ! git -C "$BREW_REPO" remote get-url origin | grep -q "Homebrew/brew"; then
-  warn "Homebrew repo remote doesn't point to Homebrew/brew. Skipping dev setup."
-else
-  info "Homebrew repo at ${BREW_REPO}"
-
-  # Install development gems (style, typecheck, tests, etc.)
-  info "Installing Homebrew development gems..."
-  brew install-bundler-gems --groups=all || warn "Some gem groups failed to install (non-fatal)."
-
-  # Install useful development formulae
-  info "Installing development formulae..."
-  brew install shellcheck shfmt gh || true
-fi
-
-# ── 5. Install Claude Code ───────────────────────────────────────────────────
+# ── 3. Install Claude Code ───────────────────────────────────────────────────
 
 info "Installing Claude Code..."
 
 if command_exists claude; then
   info "Claude Code already installed: $(claude --version 2>/dev/null || echo 'unknown version')"
+  info "Updating to latest..."
+  npm update -g @anthropic-ai/claude-code || npm install -g @anthropic-ai/claude-code
 else
   npm install -g @anthropic-ai/claude-code
 fi
 
-# ── 6. Configure SPICE/QEMU guest agent (optional, for UTM clipboard/resize)
+# ── 4. UTM/QEMU guest agents (clipboard, display auto-resize) ───────────────
 
-if command_exists pacman; then
-  info "Installing UTM/QEMU guest utilities for better VM integration..."
-  sudo pacman -S --noconfirm --needed \
-    spice-vdagent \
-    qemu-guest-agent || warn "Guest agent packages not available (non-fatal)."
+info "Installing UTM/QEMU guest utilities..."
 
-  # Enable services if available
-  sudo systemctl enable --now spice-vdagentd.service 2>/dev/null || true
-  sudo systemctl enable --now qemu-guest-agent.service 2>/dev/null || true
-fi
+sudo pacman -S --noconfirm --needed \
+  spice-vdagent \
+  qemu-guest-agent || warn "Guest agent packages not available (non-fatal)."
 
-# ── 7. Verify setup ──────────────────────────────────────────────────────────
+# Enable services so clipboard sharing and display resize work in UTM
+sudo systemctl enable --now spice-vdagentd.service 2>/dev/null || true
+sudo systemctl enable --now qemu-guest-agent.service 2>/dev/null || true
+
+# ── 5. Verify setup ──────────────────────────────────────────────────────────
 
 info "Verifying setup..."
 
@@ -167,23 +102,18 @@ echo ""
 echo " Tool Versions"
 echo "──────────────────────────────────────────"
 echo "  git:      $(git --version 2>/dev/null | awk '{print $3}')"
-echo "  ruby:     $(ruby --version 2>/dev/null | awk '{print $2}')"
 echo "  node:     $(node --version 2>/dev/null)"
-echo "  brew:     $(brew --version 2>/dev/null | head -1)"
+echo "  npm:      $(npm --version 2>/dev/null)"
 echo "  claude:   $(claude --version 2>/dev/null || echo 'not found')"
 echo ""
 echo "──────────────────────────────────────────"
-
-# Run brew doctor for a health check
-info "Running brew doctor..."
-brew doctor || warn "brew doctor reported warnings (see above)."
 
 echo ""
 info "Setup complete!"
 echo ""
 echo "Next steps:"
 echo "  1. Open a new terminal (or run: source ~/.bashrc)"
-echo "  2. Run 'claude' to start Claude Code"
-echo "  3. Navigate to $(brew --repository) to work on Homebrew source"
-echo "  4. The .claude/settings.json hooks are already configured in the repo"
+echo "  2. Run 'claude' to launch Claude Code"
+echo "  3. If clipboard isn't working in UTM, log out and back in"
+echo "     for spice-vdagent to take effect"
 echo ""
