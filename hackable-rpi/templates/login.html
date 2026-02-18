@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Login — RPi{% endblock %}
+{% block content %}
+<div class="login-box">
+  <div class="rpi-logo">&#127817;</div>
+  <h1>Raspberry Pi</h1>
+  <h2>Control Panel Login</h2>
+
+  {% if error %}
+  <div class="alert alert-error">{{ error }}</div>
+  {% endif %}
+
+  <!-- HINT: try username: admin' -- and any password -->
+  <form method="POST" action="/login">
+    <div class="form-group">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username"
+             placeholder="pi" autocomplete="off" required>
+    </div>
+    <div class="form-group">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password"
+             placeholder="••••••••" required>
+    </div>
+    <button type="submit" class="btn btn-primary btn-block">Sign In</button>
+  </form>
+
+  <div class="login-hints">
+    <small>Default credentials: <code>admin</code> / <code>raspberry</code></small><br>
+    <small>Hint: Check <a href="/api/info">/api/info</a> for more details</small>
+  </div>
+</div>
+{% endblock %}

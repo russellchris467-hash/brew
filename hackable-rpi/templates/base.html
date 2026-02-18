@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}RaspberryPi Dashboard{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  {% if session.user_id %}
+  <nav class="navbar">
+    <span class="brand">&#127817; RPi Control Panel</span>
+    <div class="nav-links">
+      <a href="{{ url_for('dashboard') }}">Dashboard</a>
+      <a href="{{ url_for('terminal') }}">Terminal</a>
+      <a href="{{ url_for('files') }}">Files</a>
+      <a href="{{ url_for('api_info') }}" target="_blank">API Info</a>
+      {% if session.role == 'admin' %}
+      <a href="{{ url_for('admin') }}?auth=1" class="admin-link">Admin</a>
+      {% endif %}
+      <a href="{{ url_for('logout') }}" class="logout">Logout ({{ session.username }})</a>
+    </div>
+  </nav>
+  {% endif %}
+
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer>
+    <small>Raspberry Pi Simulator &mdash; For cybersecurity training only &mdash;
+      <a href="{{ url_for('api_info') }}" target="_blank">/api/info</a>
+    </small>
+  </footer>
+</body>
+</html>

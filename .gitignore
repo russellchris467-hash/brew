@@ -7,6 +7,10 @@
 # Unignore the contents of `Library` as that's where our code lives.
 !/Library
 
+# Hackable Raspberry Pi training simulator
+!/hackable-rpi
+!/hackable-rpi/**
+
 # Ignore files within `Library` (again).
 /Library/Homebrew/.npmignore
 /Library/Homebrew/bin

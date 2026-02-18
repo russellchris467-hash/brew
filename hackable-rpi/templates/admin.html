@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Admin Panel — RPi{% endblock %}
+{% block content %}
+<div class="card admin-card">
+  <h2>&#128272; Admin Panel</h2>
+  <div class="alert alert-warning">
+    You accessed this via <code>?auth=1</code> — no real role check was performed.
+    <br><strong>Flag: FLAG{4dm1n_p4n3l_byp4ss}</strong>
+  </div>
+
+  <h3>Users</h3>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>ID</th><th>Username</th><th>Password</th>
+        <th>Role</th><th>Email</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for user in users %}
+      <tr>
+        <td>{{ user.id }}</td>
+        <td>{{ user.username }}</td>
+        <td class="password-cell">{{ user.password }}</td>
+        <td><span class="badge badge-{{ user.role }}">{{ user.role }}</span></td>
+        <td>{{ user.email }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h3>Secrets</h3>
+  <table class="data-table">
+    <thead><tr><th>ID</th><th>Name</th><th>Value</th></tr></thead>
+    <tbody>
+      {% for s in secrets %}
+      <tr>
+        <td>{{ s.id }}</td>
+        <td>{{ s.name }}</td>
+        <td class="secret-cell">{{ s.value }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

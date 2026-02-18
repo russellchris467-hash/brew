@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Files — RPi{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>&#128193; File Browser</h2>
+
+  {% if file_list is defined and file_list %}
+  <ul class="file-list">
+    {% for f in file_list %}
+    <li><a href="/files?name={{ f }}">{{ f }}</a></li>
+    {% endfor %}
+  </ul>
+  <hr>
+  {% endif %}
+
+  <form method="GET" action="/files" class="form-inline">
+    <div class="form-group input-row">
+      <label>Filename</label>
+      <!-- [VULN-06] Path Traversal: try ../../etc/passwd -->
+      <input type="text" name="name"
+             value="{{ filename or '' }}"
+             placeholder="filename.txt  or  ../../etc/passwd">
+      <button type="submit" class="btn btn-primary">Open</button>
+    </div>
+  </form>
+
+  {% if content is not none %}
+  <div class="file-content">
+    <h3>{{ filename }}</h3>
+    <pre>{{ content }}</pre>
+  </div>
+  {% endif %}
+
+  <div class="hint-box">
+    <strong>Training hints:</strong>
+    <ul>
+      <li>Try: <code>backup.txt</code></li>
+      <li>Try: <code>../../etc/passwd</code></li>
+      <li>Try: <code>../../etc/hostname</code></li>
+    </ul>
+  </div>
+</div>
+{% endblock %}

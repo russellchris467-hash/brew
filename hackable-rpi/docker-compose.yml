@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  hackable-rpi:
+    build: .
+    container_name: hackable-rpi
+    ports:
+      - "5000:5000"     # Access at http://localhost:5000
+    volumes:
+      - ./db:/app/db    # Persist SQLite database between restarts
+      - ./files:/app/files
+    restart: unless-stopped
+    # Uncomment to bind only to localhost (safer):
+    # ports:
+    #   - "127.0.0.1:5000:5000"

@@ -1,0 +1,281 @@
+/* Hackable RPi Simulator — Stylesheet */
+
+:root {
+  --bg:        #0d1117;
+  --surface:   #161b22;
+  --surface2:  #21262d;
+  --border:    #30363d;
+  --text:      #c9d1d9;
+  --text-muted:#8b949e;
+  --green:     #3fb950;
+  --red:       #f85149;
+  --yellow:    #d29922;
+  --blue:      #388bfd;
+  --purple:    #a371f7;
+  --rpi-red:   #c51a4a;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+a { color: var(--blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code {
+  background: var(--surface2);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+/* Navbar */
+.navbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0.75rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.brand {
+  font-size: 1.2rem;
+  font-weight: bold;
+  color: var(--rpi-red);
+}
+
+.nav-links { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+.nav-links a { color: var(--text-muted); font-size: 0.9rem; }
+.nav-links a:hover { color: var(--text); }
+.nav-links .admin-link { color: var(--yellow); }
+.nav-links .logout { color: var(--red); }
+
+/* Layout */
+.container {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+  flex: 1;
+  width: 100%;
+}
+
+/* Cards */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.card h2 {
+  margin-bottom: 1rem;
+  font-size: 1.1rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.5rem;
+}
+
+.card h3 { margin: 1rem 0 0.5rem; font-size: 1rem; }
+
+.center { text-align: center; }
+
+/* Alerts */
+.alert {
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+.alert-error   { background: rgba(248,81,73,0.15); border: 1px solid var(--red);    color: var(--red);    }
+.alert-success { background: rgba(63,185,80,0.15); border: 1px solid var(--green);  color: var(--green);  }
+.alert-warning { background: rgba(210,153,34,0.15); border: 1px solid var(--yellow); color: var(--yellow); }
+
+/* Badges */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: bold;
+}
+.badge-admin { background: rgba(163,113,247,0.2); color: var(--purple); border: 1px solid var(--purple); }
+.badge-user  { background: rgba(56,139,253,0.2); color: var(--blue);   border: 1px solid var(--blue);   }
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 0.9rem;
+  background: var(--surface2);
+  color: var(--text);
+  transition: background 0.15s;
+}
+.btn:hover { background: var(--border); }
+.btn-primary { background: var(--rpi-red); border-color: var(--rpi-red); color: #fff; }
+.btn-primary:hover { background: #a01540; }
+.btn-sm { padding: 0.25rem 0.6rem; font-size: 0.8rem; }
+.btn-block { width: 100%; text-align: center; }
+
+/* Forms */
+.form-group { margin-bottom: 1rem; }
+.form-group label { display: block; margin-bottom: 0.4rem; font-size: 0.9rem; color: var(--text-muted); }
+input[type="text"],
+input[type="password"],
+textarea {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.95rem;
+}
+input:focus, textarea:focus {
+  outline: none;
+  border-color: var(--blue);
+}
+.input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.input-row label { margin: 0; min-width: 50px; }
+.input-row input { flex: 1; }
+.input-row .btn  { white-space: nowrap; }
+
+/* Login page */
+.login-box {
+  max-width: 400px;
+  margin: 4rem auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 2.5rem;
+  text-align: center;
+}
+.rpi-logo { font-size: 3rem; margin-bottom: 0.5rem; }
+.login-box h1 { color: var(--rpi-red); margin-bottom: 0.25rem; }
+.login-box h2 { font-size: 1rem; color: var(--text-muted); margin-bottom: 1.5rem; }
+.login-box .form-group label { text-align: left; }
+.login-hints { margin-top: 1.5rem; color: var(--text-muted); line-height: 1.8; }
+
+/* GPIO Grid */
+.gpio-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 0.75rem;
+}
+.gpio-pin {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  text-align: center;
+  font-size: 0.85rem;
+}
+.gpio-pin .pin-num   { display: block; font-weight: bold; color: var(--text-muted); }
+.gpio-pin .pin-label { display: block; margin: 0.25rem 0; }
+.gpio-pin .pin-state { display: block; font-size: 0.75rem; font-weight: bold; margin-bottom: 0.5rem; }
+.pin-high { border-color: var(--green); }
+.pin-high .pin-state { color: var(--green); }
+.pin-low .pin-state  { color: var(--text-muted); }
+
+/* Notes */
+.note {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.note strong { display: block; margin-bottom: 0.3rem; }
+.note-content { font-size: 0.9rem; color: var(--text-muted); }
+.note-form { margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 1rem; }
+
+/* Terminal */
+.terminal-card {}
+.terminal-output {
+  background: #000;
+  border: 1px solid var(--green);
+  border-radius: 6px;
+  padding: 1rem;
+  margin-top: 1rem;
+}
+.terminal-output pre {
+  color: var(--green);
+  font-family: monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Files */
+.file-list { list-style: none; margin-bottom: 1rem; }
+.file-list li { padding: 0.3rem 0; border-bottom: 1px solid var(--border); }
+.file-content { margin-top: 1rem; }
+.file-content h3 { color: var(--yellow); margin-bottom: 0.5rem; }
+.file-content pre {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  padding: 1rem;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: monospace;
+  font-size: 0.9rem;
+}
+
+/* Admin */
+.admin-card {}
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  margin-bottom: 1.5rem;
+}
+.data-table th, .data-table td {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+.data-table th { background: var(--surface2); color: var(--text-muted); }
+.data-table tr:hover td { background: var(--surface2); }
+.password-cell { color: var(--red); font-family: monospace; }
+.secret-cell   { color: var(--yellow); font-family: monospace; font-size: 0.85rem; }
+
+/* Hint box */
+.hint-box {
+  margin-top: 1.5rem;
+  background: rgba(210,153,34,0.08);
+  border: 1px solid rgba(210,153,34,0.3);
+  border-radius: 6px;
+  padding: 1rem;
+  font-size: 0.9rem;
+}
+.hint-box strong { color: var(--yellow); }
+.hint-box ul { margin-top: 0.5rem; padding-left: 1.2rem; }
+.hint-box li { margin-bottom: 0.25rem; }
+
+/* Misc */
+.text-muted { color: var(--text-muted); font-size: 0.9rem; }
+h1 { font-size: 1.5rem; margin-bottom: 1rem; }
+
+footer {
+  text-align: center;
+  padding: 1rem;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}

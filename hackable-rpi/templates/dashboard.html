@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — RPi{% endblock %}
+{% block content %}
+<h1>Welcome, {{ username }} <span class="badge badge-{{ role }}">{{ role }}</span></h1>
+
+{% if msg %}
+<div class="alert alert-success">{{ msg }}</div>
+{% endif %}
+
+<!-- GPIO Panel -->
+<section class="card">
+  <h2>&#9889; GPIO Pins</h2>
+  <div class="gpio-grid">
+    {% for pin in pins %}
+    <div class="gpio-pin {{ 'pin-high' if pin.state == 'HIGH' else 'pin-low' }}">
+      <span class="pin-num">GPIO {{ pin.pin }}</span>
+      <span class="pin-label">{{ pin.label }}</span>
+      <span class="pin-state">{{ pin.state }}</span>
+      <form method="POST" action="/gpio/toggle" style="margin:0">
+        <input type="hidden" name="pin" value="{{ pin.pin }}">
+        <button type="submit" class="btn btn-sm">Toggle</button>
+      </form>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<!-- Notes — Stored XSS target -->
+<section class="card">
+  <h2>&#128203; Notes</h2>
+
+  <!-- [VULN-02] XSS: note content rendered with |safe — raw HTML injected -->
+  {% for note in notes %}
+  <div class="note">
+    <strong>{{ note.title }}</strong>
+    <div class="note-content">{{ note.content | safe }}</div>
+  </div>
+  {% endfor %}
+
+  <form method="POST" action="/dashboard" class="note-form">
+    <h3>Add Note</h3>
+    <div class="form-group">
+      <input type="text" name="title" placeholder="Title" required>
+    </div>
+    <div class="form-group">
+      <textarea name="content" rows="3"
+        placeholder='Try: <img src=x onerror="alert(document.cookie)">'></textarea>
+    </div>
+    <button type="submit" class="btn btn-primary">Save Note</button>
+  </form>
+</section>
+
+<!-- System Info -->
+<section class="card">
+  <h2>&#128297; Quick Links</h2>
+  <ul>
+    <li><a href="/api/user/1">/api/user/1</a> — try other IDs too</li>
+    <li><a href="/api/gpio">/api/gpio</a> — GPIO status JSON</li>
+    <li><a href="/files">/files</a> — file browser</li>
+    <li><a href="/terminal">/terminal</a> — ping utility</li>
+    <li><a href="/admin?auth=1">/admin?auth=1</a> — admin panel</li>
+  </ul>
+</section>
+{% endblock %}
