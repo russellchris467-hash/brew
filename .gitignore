@@ -212,3 +212,6 @@
 
 # Ignore local AI configuration
 /.claude/settings.local.json
+
+# Ignore Python bytecode cache
+/.claude/__pycache__/
