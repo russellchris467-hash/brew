@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "scan_unicode": {
+      "command": "python3",
+      "args": [".claude/scan_unicode.py", "--mcp"]
+    }
+  }
+}

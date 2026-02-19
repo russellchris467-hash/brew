@@ -208,6 +208,7 @@
 # Unignore AI configuration
 !/.cursor
 !/.claude
+!/.mcp.json
 
 # Ignore local AI configuration
 /.claude/settings.local.json
