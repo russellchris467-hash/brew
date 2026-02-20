@@ -6,6 +6,13 @@
       "args": [
         "mcp-server"
       ]
+    },
+    "shodan": {
+      "type": "stdio",
+      "command": "mcp-shodan",
+      "env": {
+        "SHODAN_API_KEY": "your-shodan-api-key"
+      }
     }
   }
 }
