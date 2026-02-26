@@ -75,7 +75,11 @@ download_kernel() {
     cd "$BUILD_DIR"
 
     if [[ -f "${KERNEL_TARBALL}" ]]; then
-        warn "Tarball already exists, skipping download"
+        # FIX(HIGH): Previously skipped download AND verification if tarball existed.
+        # A previously cached but tampered tarball would be used without re-checking.
+        # Now we always re-download the .sign file and re-verify.
+        warn "Tarball already cached — re-downloading signature for fresh verification"
+        curl -fsSL -O "$KERNEL_SIG_URL"
     else
         log "Downloading Linux ${KERNEL_VERSION}..."
         curl -fsSL --progress-bar -O "$KERNEL_URL"
@@ -89,10 +93,13 @@ download_kernel() {
         '647F28654894E3BD457199BE38DBBDC86092693E' 2>/dev/null || \
         warn "GPG key import failed — skipping signature check (not recommended for production)"
 
+    # FIX(HIGH): Previously continued build even when GPG verification failed.
+    # A compromised CDN or MITM could deliver a backdoored kernel tarball and the
+    # build would proceed without warning.  Now we die() on any verification failure.
     if gpg --verify "${KERNEL_TARBALL}.sign" "${KERNEL_TARBALL}" 2>/dev/null; then
         ok "GPG signature verified"
     else
-        warn "GPG verification failed or skipped — proceeding anyway (verify manually for production builds)"
+        die "GPG verification FAILED for ${KERNEL_TARBALL}.\n  Do not build from an unverified tarball.\n  To force (dangerous): delete the tarball and re-examine the key import."
     fi
 }
 
@@ -218,9 +225,15 @@ install_artifacts() {
     cp .config "${OUTPUT_DIR}/boot/config-${KERNEL_VERSION}-hardened"
 
     # Modules
+    # FIX(HIGH): Previously stripped modules AFTER installation.
+    # With CONFIG_MODULE_SIG_FORCE=y the kernel appends a cryptographic signature
+    # to each .ko at the end of the file.  Running strip --strip-debug rewrites ELF
+    # sections and destroys those appended signatures, causing every module to fail
+    # to load at runtime with "module verification failed: signature and/or required
+    # key missing".  Stripping must happen BEFORE signing; since the kernel build
+    # system handles both, we must NOT strip after modules_install.
     make INSTALL_MOD_PATH="${OUTPUT_DIR}/modules" modules_install
-    # Strip debug info from modules to reduce size
-    find "${OUTPUT_DIR}/modules" -name "*.ko" -exec strip --strip-debug {} \;
+    # DO NOT strip signed modules — stripping destroys the appended PKCS#7 signature.
 
     # Headers (needed for DKMS / external modules)
     make INSTALL_HDR_PATH="${OUTPUT_DIR}/headers" headers_install

@@ -64,8 +64,27 @@ write_grub_config() {
     log "Writing GRUB configuration..."
 
     local KERNEL_CMDLINE="quiet splash loglevel=3 apparmor=1 security=apparmor selinux=0"
-    local HARDEN_CMDLINE="init_on_alloc=1 init_on_free=1 slab_nomerge vsyscall=none page_alloc.shuffle=1 randomize_kstack_offset=on spectre_v2=on spec_store_bypass_disable=on l1tf=full,force mds=full,nosmt pti=on"
+    # FIX(LOW): Added TAA (tsx_async_abort), SRBDS (srbds), and MMIO stale data
+    # mitigations which were absent from the original cmdline.
+    local HARDEN_CMDLINE="init_on_alloc=1 init_on_free=1 slab_nomerge vsyscall=none page_alloc.shuffle=1 randomize_kstack_offset=on spectre_v2=on spec_store_bypass_disable=on l1tf=full,force mds=full,nosmt pti=on tsx=off tsx_async_abort=full,nosmt srbds=full mmio_stale_data=full,nosmt"
     local AMNESIAC_CMDLINE="toram=1 forensic=0"
+
+    # FIX(HIGH): GRUB superuser was declared but no password_pbkdf2 line was present,
+    # meaning ANY user could edit boot entries and inject arbitrary kernel parameters
+    # (e.g. init=/bin/sh, removing apparmor=1, disabling toram).
+    # Now we require a GRUB_ADMIN_HASH env var containing a grub-mkpasswd-pbkdf2 hash.
+    # Generate with:  grub-mkpasswd-pbkdf2 | grep -oP 'grub\.pbkdf2\S+'
+    local grub_password_line=""
+    if [[ -n "${GRUB_ADMIN_HASH:-}" ]]; then
+        grub_password_line="password_pbkdf2 admin ${GRUB_ADMIN_HASH}"
+        log "GRUB admin password hash set"
+    else
+        warn "GRUB_ADMIN_HASH not set — boot menu entries will NOT be password-protected."
+        warn "Anyone with physical access can edit kernel parameters (e.g. disable apparmor, toram)."
+        warn "Generate a hash: grub-mkpasswd-pbkdf2 | grep -oP 'grub\\.pbkdf2\\S+'"
+        warn "Then re-run with: GRUB_ADMIN_HASH=<hash> ./build-iso.sh"
+        grub_password_line="# WARNING: no password set — boot entries are unprotected"
+    fi
 
     cat > "${ISO_WORK}/boot/grub/grub.cfg" << GRUB_EOF
 # ===========================================================================
@@ -75,11 +94,8 @@ set default=0
 set timeout=10
 set timeout_style=menu
 
-# Disable GRUB serial input (security)
 set superusers="admin"
-# NOTE: Set a proper hashed password for production:
-#   grub-mkpasswd-pbkdf2
-# password_pbkdf2 admin <hash_here>
+${grub_password_line}
 
 insmod all_video
 insmod gfxterm

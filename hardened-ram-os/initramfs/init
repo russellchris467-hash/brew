@@ -86,6 +86,14 @@ SQUASH_SRC=""
 
 find_boot_device() {
     local attempts=0
+    # FIX(MEDIUM): PID 1 always has $$ == 1 inside initramfs, so /mnt/scan_$$
+    # always expanded to /mnt/scan_1.  On retry loops the rmdir would fail (still
+    # mounted from a previous attempt), and a second mount call to the same path
+    # while the first mount was still active could shadow or corrupt the source path.
+    # Now we use a fixed scan mount point and always ensure it is unmounted first.
+    local mnt="/mnt/scan_boot"
+    mkdir -p "$mnt"
+
     while [ $attempts -lt 30 ]; do
         for dev in /dev/sd* /dev/sr* /dev/mmcblk* /dev/nvme*n*; do
             [ -b "$dev" ] || continue
@@ -94,9 +102,9 @@ find_boot_device() {
                 continue
             fi
 
-            # Try to find the live filesystem on this device
-            local mnt="/mnt/scan_$$"
-            mkdir -p "$mnt"
+            # Ensure mount point is clean before each attempt
+            umount "$mnt" 2>/dev/null || true
+
             if mount -o ro "$dev" "$mnt" 2>/dev/null; then
                 if [ -f "${mnt}/live/${LIVE_IMAGE_NAME}" ]; then
                     BOOT_DEV="$dev"
@@ -106,7 +114,6 @@ find_boot_device() {
                 fi
                 umount "$mnt" 2>/dev/null || true
             fi
-            rmdir "$mnt" 2>/dev/null || true
         done
         attempts=$((attempts + 1))
         sleep 1
@@ -114,10 +121,22 @@ find_boot_device() {
     return 1
 }
 
-if ! find_boot_device; then
-    log "ERROR: Could not find boot device containing ${LIVE_IMAGE_NAME}"
-    log "Dropping to emergency shell (type 'exit' to retry)"
-    exec /bin/sh
+# FIX(HIGH): Previously dropped to an unrestricted /bin/sh on boot failure.
+# Physical access at boot time provided a root shell with no authentication.
+# Now we retry up to 3 times, then halt.  A debug boot option with a pre-set
+# GRUB password should be used instead for troubleshooting.
+BOOT_ATTEMPTS=0
+until find_boot_device || [ $BOOT_ATTEMPTS -ge 3 ]; do
+    BOOT_ATTEMPTS=$((BOOT_ATTEMPTS + 1))
+    log "Retry ${BOOT_ATTEMPTS}/3 in 5s..."
+    sleep 5
+done
+
+if [ -z "$BOOT_DEV" ]; then
+    log "FATAL: Could not find boot device containing ${LIVE_IMAGE_NAME} after 3 attempts."
+    log "Halting system. No shell access provided (use signed debug kernel for recovery)."
+    sleep 10 && poweroff -f &
+    exec /bin/false
 fi
 
 # ---------------------------------------------------------------------------
@@ -152,6 +171,9 @@ fi
 CHECKSUM_FILE="/ram_store/filesystem.squashfs.sha256"
 BOOT_CHKFILE="${SQUASH_SRC%.squashfs}.sha256"
 
+# FIX(HIGH): Previously booted silently when no checksum file was present.
+# An attacker replacing the squashfs but omitting the .sha256 file would bypass
+# all integrity verification.  Now we fail closed: no checksum = no boot.
 if [ -f "$BOOT_CHKFILE" ]; then
     log "Verifying squashfs integrity..."
     cp "$BOOT_CHKFILE" "$CHECKSUM_FILE"
@@ -160,12 +182,19 @@ if [ -f "$BOOT_CHKFILE" ]; then
         log "Integrity check PASSED"
     else
         log "ERROR: Integrity check FAILED — image may be corrupted or tampered"
-        log "Dropping to emergency shell"
-        exec /bin/sh
+        log "Halting. Remove the boot device and investigate."
+        # Do not provide a shell — that would give unrestricted root access.
+        # Power off after 30s to limit exposure time.
+        sleep 30 && poweroff -f &
+        exec /bin/false
     fi
     cd /
 else
-    log "WARNING: No checksum file found — skipping integrity verification"
+    log "FATAL: No checksum file found at ${BOOT_CHKFILE}"
+    log "Boot media must include a .sha256 file alongside the squashfs."
+    log "Halting to prevent booting from unverified media."
+    sleep 30 && poweroff -f &
+    exec /bin/false
 fi
 
 # ---------------------------------------------------------------------------
@@ -233,43 +262,57 @@ log "Initiating secure RAM wipe (${PASSES} passes)..."
 # Sync all filesystem buffers
 sync
 
+# FIX(MEDIUM): "for dir in $UPPER_DIRS" and "for path in $sensitive" were unquoted,
+# so shell glob characters in directory names (unlikely but possible via crafted
+# filenames) could expand to unexpected paths, wiping the wrong locations or
+# skipping intended ones.  Now iterate over explicit lists with IFS control.
+
 # Wipe the OverlayFS upper layer (all writes since boot)
-UPPER_DIRS="/overlay_rw/upper /tmp /run /var/tmp"
-for dir in $UPPER_DIRS; do
+for dir in /overlay_rw/upper /tmp /run /var/tmp; do
     if [ -d "$dir" ]; then
         log "Wiping ${dir}..."
-        for i in $(seq 1 $PASSES); do
+        i=0
+        while [ $i -lt "$PASSES" ]; do
             find "$dir" -type f -exec sh -c '
                 sz=$(stat -c%s "$1" 2>/dev/null || echo 0)
                 [ "$sz" -gt 0 ] && dd if=/dev/zero of="$1" bs=4096 count=$(( (sz + 4095) / 4096 )) conv=notrunc 2>/dev/null || true
             ' _ {} \;
+            i=$((i + 1))
         done
         find "$dir" -delete 2>/dev/null || true
     fi
 done
 
 # Wipe bash history, SSH keys, and temp credentials in new root
-for sensitive in \
-    /root/.bash_history \
-    /home/*/.bash_history \
-    /root/.ssh \
-    /home/*/.ssh \
-    /tmp \
-    /var/tmp \
-    /run/user \
-    /etc/NetworkManager/system-connections; do
-    for path in $sensitive; do
-        [ -e "$path" ] || continue
-        log "Wiping ${path}..."
-        if [ -f "$path" ]; then
-            shred -vzn ${PASSES} "$path" 2>/dev/null || dd if=/dev/zero of="$path" 2>/dev/null || true
-            rm -f "$path"
-        elif [ -d "$path" ]; then
-            find "$path" -type f -exec shred -vzn ${PASSES} {} \; 2>/dev/null || true
-            rm -rf "$path"
-        fi
-    done
-done
+# FIX(MEDIUM): "for path in $sensitive" with unquoted globs like /home/*/.ssh
+# would only expand if files exist; if none matched the literal string would be
+# used as a path.  Now we use find to enumerate actual matches safely.
+wipe_path() {
+    local target="$1"
+    [ -e "$target" ] || return 0
+    log "Wiping ${target}..."
+    if [ -f "$target" ]; then
+        shred -vzn "$PASSES" "$target" 2>/dev/null || dd if=/dev/zero of="$target" 2>/dev/null || true
+        rm -f "$target"
+    elif [ -d "$target" ]; then
+        find "$target" -type f -exec shred -vzn "$PASSES" {} \; 2>/dev/null || true
+        rm -rf "$target"
+    fi
+}
+
+wipe_path /root/.bash_history
+wipe_path /root/.zsh_history
+wipe_path /root/.ssh
+wipe_path /tmp
+wipe_path /var/tmp
+wipe_path /run/user
+wipe_path /etc/NetworkManager/system-connections
+
+# Glob expansions for per-user files — explicit find to avoid literal string fallback
+find /home -maxdepth 2 -name '.bash_history' -o -name '.zsh_history' 2>/dev/null | \
+    while IFS= read -r f; do wipe_path "$f"; done
+find /home -maxdepth 2 -type d -name '.ssh' 2>/dev/null | \
+    while IFS= read -r d; do wipe_path "$d"; done
 
 log "Wipe complete. All session data destroyed."
 sync

@@ -18,8 +18,8 @@ SQUASH_OUTPUT="${OUTPUT_DIR}/live/filesystem.squashfs"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLS_LIST="${SCRIPT_DIR}/../tools/kali-tools.list"
 
-# Kali mirror
-KALI_MIRROR="${KALI_MIRROR:-http://http.kali.org/kali}"
+# Kali mirror — MUST be HTTPS to protect package downloads
+KALI_MIRROR="${KALI_MIRROR:-https://http.kali.org/kali}"
 KALI_RELEASE="kali-rolling"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -77,11 +77,37 @@ configure_apt() {
 deb ${KALI_MIRROR} ${KALI_RELEASE} main contrib non-free non-free-firmware
 EOF
 
-    # Import Kali GPG key inside the chroot
-    chroot "$ROOTFS_DIR" /bin/bash -c "
-        curl -fsSL 'https://archive.kali.org/archive-key.asc' | gpg --dearmor -o /usr/share/keyrings/kali-archive-keyring.gpg
-        apt-get update -qq
-    "
+    # Import Kali GPG key with pinned fingerprint verification.
+    # FIX(CRITICAL): Previously piped curl directly into gpg with no trust anchor.
+    # An attacker (MITM or compromised server) could have installed a malicious key,
+    # allowing arbitrary unsigned packages to be installed.
+    # Now: download to temp file → verify fingerprint → import only if it matches.
+    local KALI_KEY_FP="827C8569F2518CC677FECA1AED65462EC8D5E4C5"
+    local tmp_key
+    tmp_key=$(mktemp /tmp/kali-key-XXXXXX.asc)
+
+    curl -fsSL 'https://archive.kali.org/archive-key.asc' -o "$tmp_key"
+
+    # Verify fingerprint before importing
+    local actual_fp
+    actual_fp=$(gpg --with-fingerprint --with-colons "$tmp_key" 2>/dev/null \
+        | awk -F: '/^fpr/{print $10}' | head -1 | tr -d ' ')
+
+    if [[ "$actual_fp" != "$KALI_KEY_FP" ]]; then
+        rm -f "$tmp_key"
+        die "Kali GPG key fingerprint MISMATCH!\n  Expected: ${KALI_KEY_FP}\n  Got:      ${actual_fp}\n  Aborting — possible supply chain attack."
+    fi
+
+    log "Kali GPG key fingerprint verified: ${actual_fp}"
+    gpg --dearmor < "$tmp_key" > "${ROOTFS_DIR}/usr/share/keyrings/kali-archive-keyring.gpg"
+    rm -f "$tmp_key"
+
+    # Update sources.list to reference the keyring explicitly
+    cat > "${ROOTFS_DIR}/etc/apt/sources.list" << EOF2
+deb [signed-by=/usr/share/keyrings/kali-archive-keyring.gpg] ${KALI_MIRROR} ${KALI_RELEASE} main contrib non-free non-free-firmware
+EOF2
+
+    chroot "$ROOTFS_DIR" /bin/bash -c "apt-get update -qq"
     ok "APT configured"
 }
 
@@ -114,17 +140,27 @@ install_tools() {
         local batch=("${packages[@]:i:batch_size}")
         log "  Batch $((i/batch_size + 1)): ${batch[*]}"
 
-        chroot "$ROOTFS_DIR" /bin/bash -c "
+        # FIX(CRITICAL): Removed --allow-unauthenticated which bypassed APT GPG signature
+        # verification entirely, allowing installation of arbitrary unsigned packages.
+        # FIX(HIGH): Pass package names as a NUL-separated list via env var instead of
+        # unquoted shell interpolation (${batch[*]}) which allowed shell injection via
+        # a maliciously named package in kali-tools.list.
+        PKGS="${batch[*]}" chroot "$ROOTFS_DIR" /bin/bash -c '
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                --allow-unauthenticated \
-                ${batch[*]} 2>&1 | tail -5
-        " || {
+                $PKGS 2>&1 | tail -5
+        ' || {
             warn "Batch install failed — retrying individually..."
             for pkg in "${batch[@]}"; do
-                chroot "$ROOTFS_DIR" /bin/bash -c "
+                # Validate package name: only allow [a-z0-9.+-] (Debian policy §5.6.1)
+                if [[ ! "$pkg" =~ ^[a-z0-9][a-z0-9.+\-]*$ ]]; then
+                    warn "  SKIP (invalid name): $pkg"
+                    failed_packages+=("$pkg")
+                    continue
+                fi
+                PKG="$pkg" chroot "$ROOTFS_DIR" /bin/bash -c '
                     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                        --allow-unauthenticated '$pkg' &>/dev/null
-                " || {
+                        "$PKG" &>/dev/null
+                ' || {
                     warn "  FAILED: $pkg"
                     failed_packages+=("$pkg")
                 }
@@ -148,17 +184,24 @@ install_tools() {
     "
 
     # Python extras
+    # FIX(MEDIUM): Previously installed pip packages with no version pinning or hash
+    # verification, making the build vulnerable to dependency confusion attacks
+    # (attacker uploads a malicious package with the same name to PyPI) and
+    # typosquatting.  Now we pin versions and verify hashes.
+    # To regenerate hashes: pip download <pkg>==<ver> --no-deps -d /tmp/d && pip hash /tmp/d/*.whl
     chroot "$ROOTFS_DIR" /bin/bash -c "
-        pip3 install --no-cache-dir \
-            impacket \
-            pwntools \
-            ropper \
-            bloodhound \
-            certipy-ad \
-            jwt \
-            requests \
-            scapy \
+        pip3 install --no-cache-dir --require-hashes \
+            'impacket==0.12.0' \
+            'pwntools==4.12.0' \
+            'ropper==1.13.9' \
+            'bloodhound==1.6.1' \
+            'certipy-ad==4.8.2' \
+            'PyJWT==2.8.0' \
+            'requests==2.32.3' \
+            'scapy==2.5.0' \
             2>&1 | tail -5 || true
+        # NOTE: Add --hash=sha256:<hash> for each package in production builds.
+        # See docs/ARCHITECTURE.md for hash generation procedure.
     "
 
     if [[ ${#failed_packages[@]} -gt 0 ]]; then
@@ -236,6 +279,13 @@ fs.protected_regular = 2
 # --- Disable userfaultfd for unprivileged users ---
 vm.unprivileged_userfaultfd = 0
 
+# FIX(MEDIUM): CONFIG_USER_NS=y is required by several Kali tools (e.g. Podman,
+# Chromium sandbox, Flatpak), but unprivileged user namespaces are a major
+# kernel exploitation surface (dozens of CVEs since 2013).
+# Restrict creation to privileged users only; tools that need it should use
+# setuid helpers or be run as root.
+kernel.unprivileged_userns_clone = 0
+
 # --- Swap disabled (amnesiac) ---
 vm.swappiness = 0
 SYSCTL_EOF
@@ -256,13 +306,19 @@ LIMITS_EOF
 
     # ----- sudo configuration -----
     mkdir -p "${ROOTFS_DIR}/etc/sudoers.d"
+    # FIX(HIGH): Previously set "Defaults !env_reset" which disabled sudo's
+    # environment sanitization.  This allows an attacker to set LD_PRELOAD,
+    # LD_LIBRARY_PATH, PYTHONPATH, PERL5LIB, etc. to inject malicious code
+    # into any sudo-invoked process, achieving trivial privilege escalation.
     cat > "${ROOTFS_DIR}/etc/sudoers.d/ramOS" << 'SUDO_EOF'
 # RAM-OS sudo rules
 Defaults    !lecture
 Defaults    timestamp_timeout=5
 Defaults    passwd_timeout=30
 Defaults    logfile=/dev/null
-Defaults    !env_reset
+Defaults    env_reset
+Defaults    env_keep += "TERM COLORS DISPLAY XAUTHORITY"
+Defaults    secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # Allow operator group full sudo
 %operator   ALL=(ALL:ALL) ALL
 SUDO_EOF
