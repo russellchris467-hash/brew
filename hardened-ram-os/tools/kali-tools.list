@@ -1,0 +1,306 @@
+# =============================================================================
+# Kali Linux Tool List for Hardened RAM-OS
+# =============================================================================
+# Format: package_name  # category: description
+# Groups prefixed with [SECTION] are installed together
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# [CORE] System essentials
+# ---------------------------------------------------------------------------
+bash
+zsh
+tmux
+vim
+nano
+curl
+wget
+git
+make
+gcc
+python3
+python3-pip
+python3-venv
+ruby
+perl
+net-tools
+iproute2
+iputils-ping
+dnsutils
+whois
+traceroute
+tcpdump
+tshark
+socat
+ncat
+netcat-openbsd
+openssh-client
+openssl
+ca-certificates
+gnupg2
+sudo
+less
+file
+binutils
+gdb
+strace
+ltrace
+lsof
+
+# ---------------------------------------------------------------------------
+# [RECON] Information gathering
+# ---------------------------------------------------------------------------
+nmap                # Network scanner / port scanner
+masscan             # Mass IP port scanner
+unicornscan         # Async network scan
+zmap                # Internet-wide scanner
+dmitry              # Deep magic information gathering
+maltego             # Data mining / link analysis (requires JRE)
+recon-ng            # Web reconnaissance framework
+theharvester        # Email / hostname / subdomain harvester
+amass               # In-depth DNS enumeration
+subfinder           # Subdomain discovery
+dnsx                # DNS toolkit
+httpx               # HTTP probe
+gospider            # Fast web spider
+wafw00f             # WAF detection
+whatweb             # Web fingerprinting
+nikto               # Web server scanner
+wapiti              # Web application vulnerability scanner
+dirb                # Web content scanner
+gobuster            # URI/DNS busting
+ffuf                # Fuzzing / discovery
+feroxbuster         # Recursive content discovery
+arjun               # HTTP parameter discovery
+shodan              # Shodan CLI
+
+# ---------------------------------------------------------------------------
+# [WIRELESS] Wireless attacks
+# ---------------------------------------------------------------------------
+aircrack-ng         # WEP/WPA/WPA2 cracking suite
+airbase-ng          # Multi-purpose AP simulation
+aireplay-ng         # Packet injection / replay
+airodump-ng         # 802.11 frame capture
+airmon-ng           # Monitor mode manager
+airgraph-ng         # Wireless network graphing
+wifite              # Automated wireless auditor
+hcxtools            # PMKID/EAPOL capture & processing
+hcxdumptool         # Capture PMKIDs
+bettercap           # Network / BLE / WiFi attack framework
+hostapd-wpe         # Rogue AP for WPA Enterprise attacks
+freeradius-wpe      # RADIUS server for WPA-Enterprise attacks
+eaphammer           # EAP attacks
+mdk4               # Wireless DoS (testing only)
+kismet              # Wireless network detector / sniffer
+reaver              # WPS brute-force
+bully               # WPS implementation flaw attack
+pixiedust           # Pixie Dust WPS attack
+wifiphisher         # Phishing / evil twin
+kalibrate-rtl       # SDR channel calibration
+gr-osmosdr          # SDR interface
+rtl-sdr             # RTL-SDR support
+
+# ---------------------------------------------------------------------------
+# [NETWORK] Network attacks
+# ---------------------------------------------------------------------------
+responder           # NBT-NS / LLMNR / MDNS poisoner
+impacket-scripts    # SMB / Kerberos / WMI toolkit
+crackmapexec        # SMB / LDAP / WinRM network tester
+enum4linux          # Enumerate Windows / Samba hosts
+enum4linux-ng       # Modernized enum4linux
+smbclient           # SMB client
+rpcclient           # DCE/RPC client
+evil-winrm          # WinRM shell
+bloodhound          # AD attack path mapping
+neo4j               # Graph database (BloodHound backend)
+netdiscover         # Network address discovery
+arpwatch            # ARP monitor
+arpspoof            # ARP cache poisoning
+ettercap-text-only  # Network sniffer / MitM
+mitmproxy           # Interactive HTTPS proxy
+sslstrip            # SSL stripping MitM
+dnschef             # DNS proxy (spoof records)
+yersinia            # L2 protocol attacks (DHCP, STP, etc.)
+macchanger          # MAC address spoofing
+proxychains4        # Proxy chain for anonymisation
+tor                 # Tor daemon
+nftables            # Firewall / routing rules
+
+# ---------------------------------------------------------------------------
+# [WEB] Web application testing
+# ---------------------------------------------------------------------------
+burpsuite           # Web proxy / scanner (requires JRE)
+zaproxy             # OWASP ZAP web scanner
+sqlmap              # Automatic SQL injection
+xsstrike            # XSS scanner
+commix              # OS command injection
+wfuzz               # Web fuzzer
+dalfox              # XSS parameter analysis tool
+jwt_tool            # JWT testing toolkit
+jwt-cracker         # JWT cracker
+nuclei              # Fast vuln scanner with templates
+ghauri              # SQL injection tool
+nosqlmap            # NoSQL injection
+
+# ---------------------------------------------------------------------------
+# [PASSWORD] Password attacks
+# ---------------------------------------------------------------------------
+hashcat             # GPU password cracker
+john                # John the Ripper password cracker
+hydra               # Network login brute-forcer
+medusa              # Parallel network login auditor
+ncrack              # Network authentication cracker
+thc-pptp-bruter     # PPTP brute-force
+crowbar             # Brute-force (RDP / VNC / SSH key)
+patator             # Multi-purpose brute-forcer
+wordlists           # Wordlist collection (includes rockyou)
+crunch              # Custom wordlist generator
+cewl                # Custom wordlist from website
+cupp                # Common user password profiler
+rsmangler           # Wordlist mangling / permutation
+hashid              # Hash type identifier
+hash-identifier     # Identify hash types
+ophcrack            # Windows SAM cracker (rainbow tables)
+samdump2            # Dump Windows SAM hashes
+chntpw              # Reset Windows passwords offline
+
+# ---------------------------------------------------------------------------
+# [EXPLOIT] Exploitation
+# ---------------------------------------------------------------------------
+metasploit-framework  # Penetration testing framework
+beef-xss              # Browser exploitation framework
+exploitdb             # Exploit-DB database + searchsploit
+msfpc                 # MSFvenom payload creator
+venom                 # Shellcode generator
+shellter              # PE shellcode injector
+mingw-w64             # Cross-compilation for Windows payloads
+wine                  # Run Windows EXEs (payload testing)
+pwncat-cs             # Netcat on steroids (bind/reverse shells)
+pwntools              # CTF / exploit development toolkit
+ropper                # ROP gadget finder
+ROPgadget             # ROP gadget tool
+pwndbg                # GDB plugin for exploit dev
+checksec              # Binary hardening checker
+patchelf              # Patch ELF binaries
+one_gadget            # One-gadget RCE finder
+angr                  # Binary analysis platform
+radare2               # Reverse engineering framework
+
+# ---------------------------------------------------------------------------
+# [FORENSICS] Digital forensics
+# ---------------------------------------------------------------------------
+autopsy             # Digital forensics platform (GUI)
+sleuthkit           # Disk forensics toolkit
+volatility3         # Memory forensics framework
+bulk-extractor      # Forensic feature extractor
+foremost            # File carving
+scalpel             # File carver
+photorec            # Data recovery
+testdisk            # Disk / partition recovery
+binwalk             # Firmware / binary analysis
+firmware-mod-kit    # Firmware extraction / modification
+extundelete         # ext3/ext4 file recovery
+dff                 # Digital forensics framework
+dc3dd               # Forensic disk imaging
+dcfldd              # Forensic dd with hashing
+afflib-tools        # AFF forensic image tools
+ewf-tools           # EWF forensic image tools
+reglookup           # Windows registry analysis
+regripper           # Registry analysis / reporting
+hfind               # NSRL hash lookup
+ssdeep              # Fuzzy hashing
+tlsh-tools          # Locality-sensitive hashing
+steghide            # Steganography (hide/extract in images)
+stegseek            # Fast steghide cracker
+zsteg               # PNG/BMP steg detection
+exiftool            # Image/file metadata tool
+mat2                # Metadata anonymization tool
+
+# ---------------------------------------------------------------------------
+# [CRYPTO] Cryptography / PKI
+# ---------------------------------------------------------------------------
+openssl
+gnupg2
+age                 # Modern encryption tool
+sops                # Secrets management
+hashdeep            # Hash / recursive hashing
+diceware            # Passphrase generator
+sslscan             # SSL/TLS scanner
+sslyze              # Fast SSL analyzer
+testssl.sh          # SSL/TLS testing script
+certipy-ad          # Active Directory certificate abuse
+
+# ---------------------------------------------------------------------------
+# [REVERSE ENGINEERING] RE / binary analysis
+# ---------------------------------------------------------------------------
+radare2             # RE framework / disassembler
+ghidra              # NSA reverse engineering tool (requires JRE)
+rizin               # RE framework (radare2 fork)
+cutter              # GUI for rizin/radare2
+gdb                 # GNU debugger
+pwndbg              # GDB exploit dev plugin
+edb-debugger        # OllyDbg-style debugger
+x64dbg              # Windows debugger (via wine)
+apktool             # Android APK decompiler
+jadx                # DEX to Java decompiler
+dex2jar             # DEX to JAR converter
+jd-gui              # Java decompiler GUI
+bytecode-viewer     # Multi-decompiler bytecode viewer
+frida-tools         # Dynamic instrumentation toolkit
+objdump             # ELF disassembler (binutils)
+ltrace              # Library call tracer
+strace              # System call tracer
+strings             # Print printable strings
+hexedit             # Hex editor
+bvi                 # Binary VI editor
+yara                # Malware pattern matching
+
+# ---------------------------------------------------------------------------
+# [SOCIAL ENGINEERING]
+# ---------------------------------------------------------------------------
+set               # Social Engineering Toolkit
+gophish           # Phishing platform
+evilginx2         # Phishing / session hijacking proxy
+
+# ---------------------------------------------------------------------------
+# [EVASION / ANONYMITY]
+# ---------------------------------------------------------------------------
+tor
+proxychains4
+i2p                 # Invisible Internet Project
+openvpn             # VPN client
+wireguard-tools     # WireGuard VPN
+macchanger
+bleachbit           # Secure file deletion / privacy
+secure-delete       # srm / sfill / smem
+
+# ---------------------------------------------------------------------------
+# [HARDWARE / EMBEDDED]
+# ---------------------------------------------------------------------------
+minicom             # Serial terminal
+screen              # Terminal multiplexer
+openocd             # JTAG / SWD debugger
+flashrom            # Flash chip programmer
+esptool             # ESP8266/ESP32 flasher
+avrdude             # AVR microcontroller programmer
+sigrok-cli          # Logic analyser
+pulseview           # Logic analyser GUI
+hackrf              # HackRF SDR
+gnuradio            # Software-defined radio
+gqrx                # SDR receiver
+multimon-ng         # Digital radio decoder
+rtl-433             # 433MHz device decoder
+
+# ---------------------------------------------------------------------------
+# [CONTAINERS / CLOUD]
+# ---------------------------------------------------------------------------
+docker.io           # Container runtime
+kubectl             # Kubernetes CLI
+helm                # Kubernetes package manager
+awscli              # AWS CLI
+azure-cli           # Azure CLI
+google-cloud-sdk    # GCP CLI
+pacu                # AWS exploitation framework
+trufflehog          # Secret scanner in git repos
+gitleaks            # Git secrets scanner
+trivy               # Container / cloud vulnerability scanner

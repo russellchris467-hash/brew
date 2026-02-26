@@ -1,0 +1,328 @@
+#!/bin/sh
+# =============================================================================
+# init — Amnesiac RAM-OS early userspace init
+# =============================================================================
+# This script runs as PID 1 inside the initramfs.  It:
+#   1. Mounts essential pseudo-filesystems
+#   2. Finds the squashfs live image on boot media (USB/CD)
+#   3. Loads the squashfs into RAM via a tmpfs copy (full RAM load)
+#   4. Mounts the squashfs read-only with a tmpfs overlay (OverlayFS)
+#   5. Switches root into the overlay — all writes go to RAM
+#   6. Registers a shutdown hook that zero-wipes all tmpfs pages
+# =============================================================================
+set -e
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+NEWROOT=/newroot
+SQUASH_MNT=/squash_ro
+OVERLAY_WORK=/overlay_work
+OVERLAY_UPPER=/overlay_rw
+LIVE_IMAGE_NAME="filesystem.squashfs"
+WIPE_PASSES=3
+
+# ---------------------------------------------------------------------------
+# Early mounts
+# ---------------------------------------------------------------------------
+mount -t proc     proc    /proc
+mount -t sysfs    sysfs   /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs    tmpfs   /run
+mkdir -p /dev/pts
+mount -t devpts   devpts  /dev/pts
+
+# Kernel messages: suppress verbose output
+echo 3 > /proc/sys/kernel/printk
+
+# ---------------------------------------------------------------------------
+# Helper: log with timestamp
+# ---------------------------------------------------------------------------
+log() {
+    echo "[$(cut -d' ' -f1 /proc/uptime)] $*"
+}
+
+# ---------------------------------------------------------------------------
+# Entropy gathering (critical before crypto operations)
+# ---------------------------------------------------------------------------
+log "Gathering entropy from hardware..."
+if [ -c /dev/hwrng ]; then
+    dd if=/dev/hwrng of=/dev/random bs=512 count=4 2>/dev/null || true
+fi
+# Stir the pool with CPU jitter
+dd if=/proc/interrupts of=/dev/random bs=1024 count=1 2>/dev/null || true
+dd if=/proc/sys/kernel/random/uuid of=/dev/random bs=1 count=36 2>/dev/null || true
+log "Entropy pool seeded"
+
+# ---------------------------------------------------------------------------
+# Parse kernel command line
+# ---------------------------------------------------------------------------
+BOOT_LABEL=""
+BOOT_UUID=""
+TORAM=1          # Default: always copy to RAM
+QUIET=0
+FORENSIC=0       # If 1: do NOT mount anything automatically (forensic mode)
+
+for param in $(cat /proc/cmdline); do
+    case "$param" in
+        boot=label:*) BOOT_LABEL="${param#boot=label:}" ;;
+        boot=UUID:*)  BOOT_UUID="${param#boot=UUID:}" ;;
+        toram=0)      TORAM=0 ;;
+        quiet)        QUIET=1 ;;
+        forensic)     FORENSIC=1 ;;
+    esac
+done
+
+if [ "$FORENSIC" = "1" ]; then
+    log "FORENSIC MODE: no auto-mount of local disks"
+fi
+
+# ---------------------------------------------------------------------------
+# Wait for boot device to appear
+# ---------------------------------------------------------------------------
+log "Scanning for boot media..."
+BOOT_DEV=""
+SQUASH_SRC=""
+
+find_boot_device() {
+    local attempts=0
+    while [ $attempts -lt 30 ]; do
+        for dev in /dev/sd* /dev/sr* /dev/mmcblk* /dev/nvme*n*; do
+            [ -b "$dev" ] || continue
+            # Skip mounted devices if forensic mode
+            if [ "$FORENSIC" = "1" ] && grep -q "$dev" /proc/mounts 2>/dev/null; then
+                continue
+            fi
+
+            # Try to find the live filesystem on this device
+            local mnt="/mnt/scan_$$"
+            mkdir -p "$mnt"
+            if mount -o ro "$dev" "$mnt" 2>/dev/null; then
+                if [ -f "${mnt}/live/${LIVE_IMAGE_NAME}" ]; then
+                    BOOT_DEV="$dev"
+                    SQUASH_SRC="${mnt}/live/${LIVE_IMAGE_NAME}"
+                    log "Found live image on ${dev}"
+                    return 0
+                fi
+                umount "$mnt" 2>/dev/null || true
+            fi
+            rmdir "$mnt" 2>/dev/null || true
+        done
+        attempts=$((attempts + 1))
+        sleep 1
+    done
+    return 1
+}
+
+if ! find_boot_device; then
+    log "ERROR: Could not find boot device containing ${LIVE_IMAGE_NAME}"
+    log "Dropping to emergency shell (type 'exit' to retry)"
+    exec /bin/sh
+fi
+
+# ---------------------------------------------------------------------------
+# Copy squashfs to RAM (toram mode — the amnesiac guarantee)
+# ---------------------------------------------------------------------------
+# By loading the entire squashfs into a tmpfs file, the boot device can be
+# removed and ALL data lives only in volatile DRAM.
+# ---------------------------------------------------------------------------
+
+mkdir -p /ram_store
+mount -t tmpfs -o size=90%,mode=0700 tmpfs /ram_store
+
+if [ "$TORAM" = "1" ]; then
+    log "Copying squashfs to RAM (this may take a moment)..."
+    SQUASH_SIZE=$(stat -c%s "$SQUASH_SRC" 2>/dev/null || echo 0)
+    log "  Image size: $((SQUASH_SIZE / 1024 / 1024)) MiB"
+
+    cp "$SQUASH_SRC" /ram_store/filesystem.squashfs
+    ok_src="/ram_store/filesystem.squashfs"
+
+    log "Boot device can now be safely removed"
+    # Unmount and release the boot device
+    umount /mnt/scan_* 2>/dev/null || true
+else
+    log "WARNING: toram=0 — squashfs stays on boot device (not fully amnesiac)"
+    ok_src="$SQUASH_SRC"
+fi
+
+# ---------------------------------------------------------------------------
+# Verify squashfs integrity (SHA256)
+# ---------------------------------------------------------------------------
+CHECKSUM_FILE="/ram_store/filesystem.squashfs.sha256"
+BOOT_CHKFILE="${SQUASH_SRC%.squashfs}.sha256"
+
+if [ -f "$BOOT_CHKFILE" ]; then
+    log "Verifying squashfs integrity..."
+    cp "$BOOT_CHKFILE" "$CHECKSUM_FILE"
+    cd /ram_store
+    if sha256sum -c filesystem.squashfs.sha256 2>/dev/null; then
+        log "Integrity check PASSED"
+    else
+        log "ERROR: Integrity check FAILED — image may be corrupted or tampered"
+        log "Dropping to emergency shell"
+        exec /bin/sh
+    fi
+    cd /
+else
+    log "WARNING: No checksum file found — skipping integrity verification"
+fi
+
+# ---------------------------------------------------------------------------
+# Mount squashfs read-only
+# ---------------------------------------------------------------------------
+log "Mounting squashfs base layer..."
+mkdir -p "$SQUASH_MNT"
+mount -t squashfs -o loop,ro "$ok_src" "$SQUASH_MNT"
+
+# ---------------------------------------------------------------------------
+# Set up OverlayFS with tmpfs upper layer
+# ---------------------------------------------------------------------------
+# Lower: squashfs (read-only compressed base system)
+# Upper: tmpfs   (volatile read-write layer — wiped on shutdown)
+# Work:  tmpfs   (overlayfs internal directory)
+# ---------------------------------------------------------------------------
+log "Setting up amnesiac OverlayFS..."
+
+mkdir -p "$OVERLAY_UPPER" "$OVERLAY_WORK" "$NEWROOT"
+
+mount -t tmpfs -o size=80%,mode=0755 tmpfs /overlay_rw
+mkdir -p "${OVERLAY_UPPER}/upper" "${OVERLAY_UPPER}/work"
+
+mount -t overlay overlay \
+    -o "lowerdir=${SQUASH_MNT},upperdir=${OVERLAY_UPPER}/upper,workdir=${OVERLAY_UPPER}/work" \
+    "$NEWROOT"
+
+# ---------------------------------------------------------------------------
+# Bind-mount pseudo-filesystems into new root
+# ---------------------------------------------------------------------------
+log "Preparing new root..."
+mkdir -p "${NEWROOT}"/{proc,sys,dev,run,tmp}
+
+mount --bind /proc  "${NEWROOT}/proc"
+mount --bind /sys   "${NEWROOT}/sys"
+mount --bind /dev   "${NEWROOT}/dev"
+mount --bind /run   "${NEWROOT}/run"
+mount -t tmpfs -o size=512m,mode=1777 tmpfs "${NEWROOT}/tmp"
+
+# ---------------------------------------------------------------------------
+# Harden /proc and /sys in the new root
+# ---------------------------------------------------------------------------
+# Remount proc with hidepid=2 so users can't see each other's processes
+mount -o remount,hidepid=2,gid=0 "${NEWROOT}/proc" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# Install secure wipe shutdown hook
+# ---------------------------------------------------------------------------
+# Copy this init script's wipe functionality into the new root as a
+# systemd oneshot or SysV shutdown script.
+# ---------------------------------------------------------------------------
+log "Installing shutdown wipe hooks..."
+WIPE_SCRIPT="${NEWROOT}/usr/local/sbin/amnesiac-wipe"
+
+mkdir -p "$(dirname "$WIPE_SCRIPT")"
+cat > "$WIPE_SCRIPT" << 'WIPE_EOF'
+#!/bin/sh
+# amnesiac-wipe — Zero-wipe sensitive RAM content on shutdown
+# Called by systemd as a shutdown service (Before=umount.target)
+PASSES="${AMNESIAC_WIPE_PASSES:-3}"
+log() { echo "[amnesiac-wipe] $*"; logger -t amnesiac-wipe "$*"; }
+
+log "Initiating secure RAM wipe (${PASSES} passes)..."
+
+# Sync all filesystem buffers
+sync
+
+# Wipe the OverlayFS upper layer (all writes since boot)
+UPPER_DIRS="/overlay_rw/upper /tmp /run /var/tmp"
+for dir in $UPPER_DIRS; do
+    if [ -d "$dir" ]; then
+        log "Wiping ${dir}..."
+        for i in $(seq 1 $PASSES); do
+            find "$dir" -type f -exec sh -c '
+                sz=$(stat -c%s "$1" 2>/dev/null || echo 0)
+                [ "$sz" -gt 0 ] && dd if=/dev/zero of="$1" bs=4096 count=$(( (sz + 4095) / 4096 )) conv=notrunc 2>/dev/null || true
+            ' _ {} \;
+        done
+        find "$dir" -delete 2>/dev/null || true
+    fi
+done
+
+# Wipe bash history, SSH keys, and temp credentials in new root
+for sensitive in \
+    /root/.bash_history \
+    /home/*/.bash_history \
+    /root/.ssh \
+    /home/*/.ssh \
+    /tmp \
+    /var/tmp \
+    /run/user \
+    /etc/NetworkManager/system-connections; do
+    for path in $sensitive; do
+        [ -e "$path" ] || continue
+        log "Wiping ${path}..."
+        if [ -f "$path" ]; then
+            shred -vzn ${PASSES} "$path" 2>/dev/null || dd if=/dev/zero of="$path" 2>/dev/null || true
+            rm -f "$path"
+        elif [ -d "$path" ]; then
+            find "$path" -type f -exec shred -vzn ${PASSES} {} \; 2>/dev/null || true
+            rm -rf "$path"
+        fi
+    done
+done
+
+log "Wipe complete. All session data destroyed."
+sync
+WIPE_EOF
+chmod 700 "$WIPE_SCRIPT"
+
+# Install systemd service if systemd will be pid1
+if [ -d "${NEWROOT}/lib/systemd" ] || [ -d "${NEWROOT}/usr/lib/systemd" ]; then
+    SYSTEMD_UNIT_DIR="${NEWROOT}/etc/systemd/system"
+    mkdir -p "$SYSTEMD_UNIT_DIR"
+
+    cat > "${SYSTEMD_UNIT_DIR}/amnesiac-wipe.service" << 'UNIT_EOF'
+[Unit]
+Description=Amnesiac Secure RAM Wipe
+DefaultDependencies=no
+Before=shutdown.target reboot.target halt.target
+RequiresMountsFor=/
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/amnesiac-wipe
+TimeoutStartSec=120
+RemainAfterExit=yes
+
+[Install]
+WantedBy=halt.target reboot.target shutdown.target
+UNIT_EOF
+
+    mkdir -p "${SYSTEMD_UNIT_DIR}/halt.target.wants" \
+             "${SYSTEMD_UNIT_DIR}/reboot.target.wants" \
+             "${SYSTEMD_UNIT_DIR}/shutdown.target.wants"
+
+    for target in halt reboot shutdown; do
+        ln -sf "/etc/systemd/system/amnesiac-wipe.service" \
+            "${SYSTEMD_UNIT_DIR}/${target}.target.wants/amnesiac-wipe.service"
+    done
+fi
+
+# ---------------------------------------------------------------------------
+# Switch root
+# ---------------------------------------------------------------------------
+log "Switching root to overlay — boot complete"
+log "ALL writes are volatile and will be wiped on shutdown"
+echo ""
+echo "  ██████╗  █████╗ ███╗   ███╗     ██████╗ ███████╗"
+echo "  ██╔══██╗██╔══██╗████╗ ████║    ██╔═══██╗██╔════╝"
+echo "  ██████╔╝███████║██╔████╔██║    ██║   ██║███████╗"
+echo "  ██╔══██╗██╔══██║██║╚██╔╝██║    ██║   ██║╚════██║"
+echo "  ██║  ██║██║  ██║██║ ╚═╝ ██║    ╚██████╔╝███████║"
+echo "  ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝     ╚═════╝ ╚══════╝"
+echo ""
+echo "  HARDENED AMNESIAC RAM-OS  |  No persistence"
+echo "  All data destroyed on shutdown / power loss"
+echo ""
+
+exec switch_root "$NEWROOT" /sbin/init "$@"
