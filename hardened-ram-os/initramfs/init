@@ -98,7 +98,10 @@ find_boot_device() {
         for dev in /dev/sd* /dev/sr* /dev/mmcblk* /dev/nvme*n*; do
             [ -b "$dev" ] || continue
             # Skip mounted devices if forensic mode
-            if [ "$FORENSIC" = "1" ] && grep -q "$dev" /proc/mounts 2>/dev/null; then
+            # BUG-10 FIX: grep -q without -F treats the device path as a regex.
+            # Characters like '+' in device names (e.g. /dev/mmcblk0p1+) would be
+            # regex metacharacters, causing false-positive or false-negative matches.
+            if [ "$FORENSIC" = "1" ] && grep -qF "${dev} " /proc/mounts 2>/dev/null; then
                 continue
             fi
 
@@ -121,21 +124,17 @@ find_boot_device() {
     return 1
 }
 
-# FIX(HIGH): Previously dropped to an unrestricted /bin/sh on boot failure.
-# Physical access at boot time provided a root shell with no authentication.
-# Now we retry up to 3 times, then halt.  A debug boot option with a pre-set
-# GRUB password should be used instead for troubleshooting.
-BOOT_ATTEMPTS=0
-until find_boot_device || [ $BOOT_ATTEMPTS -ge 3 ]; do
-    BOOT_ATTEMPTS=$((BOOT_ATTEMPTS + 1))
-    log "Retry ${BOOT_ATTEMPTS}/3 in 5s..."
-    sleep 5
-done
-
-if [ -z "$BOOT_DEV" ]; then
-    log "FATAL: Could not find boot device containing ${LIVE_IMAGE_NAME} after 3 attempts."
-    log "Halting system. No shell access provided (use signed debug kernel for recovery)."
-    sleep 10 && poweroff -f &
+# BUG-17 FIX: The previous outer retry loop (`until find_boot_device || 3 tries`)
+# was redundant and confusing — find_boot_device() already retries internally for
+# up to 30 seconds.  The outer loop added up to 3×30=90 extra seconds of wait
+# while the log message said "5s", making diagnostic output misleading.
+# Now we call find_boot_device() once (which already does its own polling).
+if ! find_boot_device; then
+    log "FATAL: Could not find boot device containing ${LIVE_IMAGE_NAME}."
+    log "Halting. No shell provided (use GRUB-password-protected debug entry for recovery)."
+    # BUG-11 FIX: `sleep 30 && poweroff -f &` uses &&, so if sleep is killed
+    # (SIGKILL during early panic), poweroff never runs.  Use semicolon instead.
+    (sleep 30; poweroff -f) &
     exec /bin/false
 fi
 
@@ -168,32 +167,38 @@ fi
 # ---------------------------------------------------------------------------
 # Verify squashfs integrity (SHA256)
 # ---------------------------------------------------------------------------
-CHECKSUM_FILE="/ram_store/filesystem.squashfs.sha256"
 BOOT_CHKFILE="${SQUASH_SRC%.squashfs}.sha256"
 
 # FIX(HIGH): Previously booted silently when no checksum file was present.
 # An attacker replacing the squashfs but omitting the .sha256 file would bypass
 # all integrity verification.  Now we fail closed: no checksum = no boot.
+#
+# BUG-01 FIX: The previous implementation always verified /ram_store/filesystem.squashfs
+# regardless of the toram setting.  When toram=0, the squashfs stays on the boot device
+# and is NEVER copied to /ram_store — so sha256sum was checking a non-existent file,
+# always failing (or silently succeeding with an empty read depending on the sha256sum
+# implementation).  The checksum is now run directly against $ok_src so it works in
+# both toram=1 and toram=0 modes.
 if [ -f "$BOOT_CHKFILE" ]; then
     log "Verifying squashfs integrity..."
-    cp "$BOOT_CHKFILE" "$CHECKSUM_FILE"
-    cd /ram_store
-    if sha256sum -c filesystem.squashfs.sha256 2>/dev/null; then
-        log "Integrity check PASSED"
+    EXPECTED_HASH=$(cut -d' ' -f1 "$BOOT_CHKFILE")
+    ACTUAL_HASH=$(sha256sum "$ok_src" 2>/dev/null | cut -d' ' -f1)
+
+    if [ -n "$ACTUAL_HASH" ] && [ "$ACTUAL_HASH" = "$EXPECTED_HASH" ]; then
+        log "Integrity check PASSED (SHA256: ${ACTUAL_HASH})"
     else
-        log "ERROR: Integrity check FAILED — image may be corrupted or tampered"
+        log "ERROR: Integrity check FAILED"
+        log "  Expected: ${EXPECTED_HASH}"
+        log "  Actual:   ${ACTUAL_HASH:-<could not compute>}"
         log "Halting. Remove the boot device and investigate."
-        # Do not provide a shell — that would give unrestricted root access.
-        # Power off after 30s to limit exposure time.
-        sleep 30 && poweroff -f &
+        (sleep 30; poweroff -f) &
         exec /bin/false
     fi
-    cd /
 else
     log "FATAL: No checksum file found at ${BOOT_CHKFILE}"
     log "Boot media must include a .sha256 file alongside the squashfs."
     log "Halting to prevent booting from unverified media."
-    sleep 30 && poweroff -f &
+    (sleep 30; poweroff -f) &
     exec /bin/false
 fi
 
@@ -302,17 +307,53 @@ wipe_path() {
 
 wipe_path /root/.bash_history
 wipe_path /root/.zsh_history
+wipe_path /root/.python_history
 wipe_path /root/.ssh
 wipe_path /tmp
 wipe_path /var/tmp
 wipe_path /run/user
 wipe_path /etc/NetworkManager/system-connections
 
+# BUG-20 FIX: Previous wipe list omitted several high-value credential stores:
+#   - ~/.gnupg/        (GPG private keys, keyrings)
+#   - ~/.config/       (app configs that may store credentials, tokens)
+#   - ~/.local/share/keyrings/  (GNOME keyring — passwords, certs)
+#   - ~/.mozilla/      (Firefox: saved passwords, session cookies, history)
+#   - ~/.config/chromium/ (Chromium: same)
+#   - /root/.netrc, /root/.pgpass  (plaintext credential files)
+wipe_path /root/.gnupg
+wipe_path /root/.netrc
+wipe_path /root/.pgpass
+wipe_path /root/.aws
+wipe_path /root/.azure
+wipe_path /root/.config
+wipe_path /root/.local/share/keyrings
+wipe_path /root/.mozilla
+wipe_path /root/.config/chromium
+wipe_path /root/.config/google-chrome
+
 # Glob expansions for per-user files — explicit find to avoid literal string fallback
-find /home -maxdepth 2 -name '.bash_history' -o -name '.zsh_history' 2>/dev/null | \
-    while IFS= read -r f; do wipe_path "$f"; done
-find /home -maxdepth 2 -type d -name '.ssh' 2>/dev/null | \
-    while IFS= read -r d; do wipe_path "$d"; done
+find /home -maxdepth 2 \( \
+    -name '.bash_history' -o \
+    -name '.zsh_history' -o \
+    -name '.python_history' -o \
+    -name '.netrc' -o \
+    -name '.pgpass' \
+\) 2>/dev/null | while IFS= read -r f; do wipe_path "$f"; done
+
+find /home -maxdepth 2 -type d \( \
+    -name '.ssh' -o \
+    -name '.gnupg' -o \
+    -name '.aws' -o \
+    -name '.azure' \
+\) 2>/dev/null | while IFS= read -r d; do wipe_path "$d"; done
+
+find /home -maxdepth 3 -type d \( \
+    -name 'keyrings' -o \
+    -name '.mozilla' -o \
+    -name 'chromium' -o \
+    -name 'google-chrome' \
+\) 2>/dev/null | while IFS= read -r d; do wipe_path "$d"; done
 
 log "Wipe complete. All session data destroyed."
 sync
@@ -334,7 +375,12 @@ RequiresMountsFor=/
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/amnesiac-wipe
-TimeoutStartSec=120
+# BUG-22 FIX: 120s (2 min) is insufficient for sessions with many/large files.
+# The wipe is a multi-pass shred over ALL tmpfs contents — easily 5-15 min on a
+# session with gigabytes of tool output, downloads, or captured data.  Killing
+# the wipe early leaves sensitive data un-wiped at shutdown.  Use 'infinity' to
+# ensure the wipe always completes regardless of session size.
+TimeoutStartSec=infinity
 RemainAfterExit=yes
 
 [Install]

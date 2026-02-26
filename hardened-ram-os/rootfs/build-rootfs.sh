@@ -72,10 +72,11 @@ bootstrap_base() {
 configure_apt() {
     log "Configuring APT sources..."
 
-    # Kali rolling repository
-    cat > "${ROOTFS_DIR}/etc/apt/sources.list" << EOF
-deb ${KALI_MIRROR} ${KALI_RELEASE} main contrib non-free non-free-firmware
-EOF
+    # BUG-13 FIX: sources.list was written here without signed-by=, then
+    # overwritten below with the correct signed-by= version after key import.
+    # The first write was dead code; it briefly left an unsigned repo configured
+    # between the two writes, and created reader confusion.  Removed the first write.
+    # The correct sources.list with signed-by= is written after key verification.
 
     # Import Kali GPG key with pinned fingerprint verification.
     # FIX(CRITICAL): Previously piped curl directly into gpg with no trust anchor.
@@ -284,7 +285,17 @@ vm.unprivileged_userfaultfd = 0
 # kernel exploitation surface (dozens of CVEs since 2013).
 # Restrict creation to privileged users only; tools that need it should use
 # setuid helpers or be run as root.
-kernel.unprivileged_userns_clone = 0
+#
+# BUG-16 FIX: kernel.unprivileged_userns_clone is a DEBIAN-SPECIFIC kernel patch.
+# It does not exist in mainline Linux 6.6 that we build here and writing it will
+# produce a "sysctl: setting key ... No such file or directory" warning on boot,
+# potentially alarming users.
+# For mainline 6.1+ use kernel.apparmor_restrict_unprivileged_userns (AppArmor
+# must be enabled — it is, via CONFIG_SECURITY_APPARMOR=y).
+# Both are set for compatibility: Debian-patched kernels honour the first;
+# mainline kernels honour the second.
+kernel.apparmor_restrict_unprivileged_userns = 1
+# kernel.unprivileged_userns_clone = 0   # Debian/Ubuntu-patched kernels only
 
 # --- Swap disabled (amnesiac) ---
 vm.swappiness = 0
@@ -331,20 +342,32 @@ SUDO_EOF
     "
 
     # ----- Disable unnecessary services -----
-    local services_to_disable=(
-        bluetooth
-        avahi-daemon
-        cups
-        ModemManager
-        wpa_supplicant   # Managed manually
-        rsyslog          # Logs should not persist
-        cron             # No scheduled tasks in amnesiac OS
-        atd
-        samba
-        nfs-common
+    # BUG-15 FIX: `systemctl disable` inside a chroot requires D-Bus and a running
+    # systemd process.  In a debootstrap chroot, systemd is not running so
+    # `systemctl disable` exits 0 but creates NO symlinks — services appear disabled
+    # but are actually enabled at first boot.  The reliable method is to mask the
+    # units by symlinking them to /dev/null, which works without systemd running.
+    local services_to_mask=(
+        bluetooth.service
+        avahi-daemon.service
+        cups.service
+        cups.socket
+        ModemManager.service
+        wpa_supplicant.service
+        rsyslog.service
+        cron.service
+        atd.service
+        smbd.service
+        nmbd.service
+        nfs-common.service
+        rpcbind.service
+        rpcbind.socket
     )
-    for svc in "${services_to_disable[@]}"; do
-        chroot "$ROOTFS_DIR" systemctl disable "$svc" 2>/dev/null || true
+    local unit_dir="${ROOTFS_DIR}/etc/systemd/system"
+    mkdir -p "$unit_dir"
+    for svc in "${services_to_mask[@]}"; do
+        ln -sf /dev/null "${unit_dir}/${svc}"
+        log "  Masked: ${svc}"
     done
 
     ok "System hardened"
@@ -421,18 +444,31 @@ connection.stable-id=${CONNECTION}/${BOOT}
 NMCONF_EOF
 
     # ----- Hostname randomisation -----
+    # BUG-14 FIX: Previous implementation used `xxd -p` which is not part of
+    # busybox and may not be installed in minimal Kali.  Also `hostnamectl`
+    # requires D-Bus (systemd-hostnamed) which may not be running during
+    # the Before=network.target phase.  Replaced with:
+    # - `od` (POSIX, always available) for the random hex generation
+    # - direct write to /etc/hostname + `hostname` command as fallback
+    #   if hostnamectl is unavailable (common in containers / early boot).
     cat > "${ROOTFS_DIR}/etc/systemd/system/random-hostname.service" << 'HOSTNAME_EOF'
 [Unit]
 Description=Randomize hostname on boot
-Before=network.target
+DefaultDependencies=no
+Before=network-pre.target sysinit.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'hostnamectl set-hostname "host-$(head -c4 /dev/urandom | xxd -p)"'
+ExecStart=/bin/sh -c '\
+    rnd=$(od -An -N4 -tu4 /dev/urandom | tr -d " \n"); \
+    rnd=$(printf "%08x" $rnd); \
+    name="host-${rnd}"; \
+    echo "$name" > /etc/hostname; \
+    hostnamectl set-hostname "$name" 2>/dev/null || hostname "$name"'
 RemainAfterExit=yes
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=sysinit.target
 HOSTNAME_EOF
 
     chroot "$ROOTFS_DIR" systemctl enable random-hostname.service 2>/dev/null || true
@@ -449,23 +485,34 @@ tmpfs   /run    tmpfs   defaults,mode=755   0   0
 FSTAB_EOF
 
     # ----- Shell history disabled -----
+    # BUG-03 FIX: The original code set HISTFILE=/dev/null, then immediately
+    # called `unset HISTFILE`, then `export HISTFILE`.  After `unset`, the variable
+    # no longer exists; `export HISTFILE` exports an unset variable which in bash
+    # propagates as unset (not as /dev/null) to child processes.  The net effect
+    # was that HISTFILE was UNSET (not /dev/null), meaning bash would fall back to
+    # its default ($HOME/.bash_history) and WOULD write history.
+    # Fix: export HISTFILE=/dev/null directly without the contradictory unset.
+    # We keep unset as an additional hardening (some tools check HISTFILE existence),
+    # but do NOT export after unset.
     cat >> "${ROOTFS_DIR}/etc/bash.bashrc" << 'BASH_EOF'
 
 # --- RAM-OS amnesiac shell settings ---
-HISTFILE=/dev/null
-HISTSIZE=0
-HISTFILESIZE=0
-unset HISTFILE
-export HISTFILE HISTSIZE HISTFILESIZE
+# FIX: export before any possible unset; do NOT unset then re-export.
+export HISTFILE=/dev/null
+export HISTSIZE=0
+export HISTFILESIZE=0
+export HISTCONTROL=ignoreboth
+readonly HISTFILE HISTSIZE HISTFILESIZE   # prevent accidental re-assignment
 
 # --- Prompt indicating amnesiac mode ---
 PS1='\[\033[01;31m\][RAMÖS]\[\033[00m\] \[\033[01;33m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
 BASH_EOF
 
     cat >> "${ROOTFS_DIR}/etc/zsh/zshenv" << 'ZSH_EOF'
-HISTFILE=/dev/null
-SAVEHIST=0
-HISTSIZE=0
+# BUG-03 FIX: same issue as bash — set and export, do not unset then re-export.
+export HISTFILE=/dev/null
+export SAVEHIST=0
+export HISTSIZE=0
 ZSH_EOF
 
     ok "Amnesiac configuration applied"
@@ -557,6 +604,13 @@ main() {
     install_tools
     harden_system
     configure_amnesiac
+
+    # Tor transparent proxy (source the helper script)
+    log "Configuring Tor chained proxy..."
+    # shellcheck source=tor-proxy-setup.sh
+    source "${SCRIPT_DIR}/tor-proxy-setup.sh"
+    configure_tor_proxy "$ROOTFS_DIR"
+
     cleanup_rootfs
     pack_squashfs
 

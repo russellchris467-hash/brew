@@ -11,7 +11,12 @@ IFS=$'\n\t'
 
 KERNEL_VERSION="${KERNEL_VERSION:-6.6.30}"
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/kernel-output}"
-ISO_WORK="/tmp/ramOS-iso-$$"
+# BUG-04 FIX: "/tmp/ramOS-iso-$$" is predictable.  A local attacker can race to
+# create /tmp/ramOS-iso-<PID> as a symlink before this script runs; the cleanup
+# trap then does `rm -rf <symlink_target>`, wiping an arbitrary directory.
+# mktemp -d creates a directory with a random suffix and only the current user
+# can access it (mode 0700), eliminating both the symlink race and info leakage.
+ISO_WORK="$(mktemp -d /tmp/ramOS-iso-XXXXXX)"
 ISO_NAME="hardened-ramOS-${KERNEL_VERSION}-$(date +%Y%m%d).iso"
 ISO_OUTPUT="${OUTPUT_DIR}/${ISO_NAME}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -91,8 +96,11 @@ write_grub_config() {
 # Hardened RAM-OS GRUB Configuration
 # ===========================================================================
 set default=0
-set timeout=10
-set timeout_style=menu
+# BUG-23 FIX: 10-second timeout is too long for a security-focused system.
+# It gives a bystander ample time to read all boot option labels (revealing the
+# system's purpose) and attempt to interact with the menu.  Reduced to 5s.
+set timeout=5
+set timeout_style=countdown
 
 set superusers="admin"
 ${grub_password_line}
@@ -132,8 +140,20 @@ menuentry "Hardened RAM-OS (Safe Mode — basic drivers)" --id ramOS-safe {
     initrd /boot/initrd.img
 }
 
+# BUG-05 FIX: `chainloader +1` is a BIOS/MBR-specific mechanism that reads the
+# first sector of the current partition's disk.  On UEFI systems (the dominant
+# boot mode since ~2012) this causes a GRUB error: "error: invalid signature".
+# Fix: detect the platform at runtime and use the appropriate chainloader.
 menuentry "Boot from local disk" --id local-boot {
-    chainloader +1
+    if [ "${grub_platform}" = "efi" ]; then
+        # UEFI: boot the EFI system partition's default loader
+        chainloader /EFI/BOOT/bootx64.efi 2>/dev/null || \
+        chainloader /EFI/Microsoft/Boot/bootmgfw.efi 2>/dev/null || \
+        exit 1
+    else
+        # BIOS/MBR: chainload first sector
+        chainloader +1
+    fi
 }
 
 menuentry "Reboot" --id reboot {

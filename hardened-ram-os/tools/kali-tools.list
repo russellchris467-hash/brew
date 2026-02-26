@@ -266,6 +266,10 @@ evilginx2         # Phishing / session hijacking proxy
 # [EVASION / ANONYMITY]
 # ---------------------------------------------------------------------------
 tor
+torsocks            # Per-app Tor routing via LD_PRELOAD
+obfs4proxy          # Tor pluggable transport (bypass DPI)
+tor-geoipdb         # GeoIP for Tor node selection
+privoxy             # HTTP proxy → Tor SOCKS5 bridge
 proxychains4
 i2p                 # Invisible Internet Project
 openvpn             # VPN client
@@ -273,6 +277,7 @@ wireguard-tools     # WireGuard VPN
 macchanger
 bleachbit           # Secure file deletion / privacy
 secure-delete       # srm / sfill / smem
+nftables            # Required for transparent proxy ruleset
 
 # ---------------------------------------------------------------------------
 # [HARDWARE / EMBEDDED]

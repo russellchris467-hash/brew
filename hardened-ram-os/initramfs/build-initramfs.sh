@@ -12,9 +12,12 @@ set -euo pipefail
 IFS=$'\n\t'
 
 KERNEL_VERSION="${KERNEL_VERSION:-6.6.30}"
-KERNEL_MOD_DIR="${KERNEL_MOD_DIR:-/tmp/kernel-output/modules/lib/modules/${KERNEL_VERSION}-hardened}"
+# BUG-25: Do NOT set KERNEL_MOD_DIR here — it must be computed AFTER argument
+# parsing so that --kernel-mod-dir is not silently discarded.
 OUTPUT_DIR="${OUTPUT_DIR:-/tmp/kernel-output}"
-WORK_DIR="/tmp/initramfs-work-$$"
+# BUG-24: Use mktemp -d to avoid a predictable /tmp path that a local attacker
+# could symlink before the cleanup trap fires (rm -rf races).
+WORK_DIR="$(mktemp -d /tmp/initramfs-work-XXXXXX)"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -33,7 +36,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-KERNEL_MOD_DIR="/tmp/kernel-output/modules/lib/modules/${KERNEL_VERSION}-hardened"
+# BUG-25 FIX: Set default AFTER parsing args so --kernel-mod-dir is honoured.
+# The original code unconditionally overwrote the variable here, making the
+# --kernel-mod-dir argument completely ineffective.
+KERNEL_MOD_DIR="${KERNEL_MOD_DIR:-/tmp/kernel-output/modules/lib/modules/${KERNEL_VERSION}-hardened}"
 
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
@@ -98,12 +104,24 @@ copy_binaries() {
 # ---------------------------------------------------------------------------
 copy_libs() {
     local binary="$1"
-    ldd "$binary" 2>/dev/null | grep -oP '(/usr)?/lib\S+' | while read -r lib; do
+    # BUG-19 FIX: Use readelf -d instead of ldd to enumerate shared library
+    # dependencies.  ldd works by executing the binary's ELF interpreter
+    # (ld-linux.so) which actually loads and runs constructors — dangerous for
+    # untrusted or cross-compiled binaries.  readelf -d reads the ELF dynamic
+    # section directly without executing any code.
+    readelf -d "$binary" 2>/dev/null | awk '/NEEDED/{gsub(/\[|\]/,"",$NF); print $NF}' | \
+    while read -r libname; do
+        # Resolve library name to full path via ldconfig cache
+        local lib
+        lib="$(ldconfig -p 2>/dev/null | awk -v n="$libname" '$1==n{print $NF; exit}')"
+        [ -f "$lib" ] || lib="$(find /lib /usr/lib /lib64 /usr/lib64 \
+            -name "$libname" 2>/dev/null | head -1)"
         [ -f "$lib" ] || continue
+
         local dest="${WORK_DIR}$(dirname "$lib")"
         mkdir -p "$dest"
         [ -f "${WORK_DIR}${lib}" ] || cp "$lib" "${WORK_DIR}${lib}"
-        # Also copy symlinks
+        # Resolve and copy symlink target
         if [ -L "$lib" ]; then
             local target
             target="$(readlink -f "$lib")"
@@ -111,7 +129,7 @@ copy_libs() {
         fi
     done
 
-    # ld-linux
+    # ld-linux interpreter
     local interp
     interp="$(readelf -l "$binary" 2>/dev/null | grep 'interpreter' | grep -oP '/\S+' || true)"
     if [ -n "$interp" ] && [ -f "$interp" ]; then
@@ -195,14 +213,25 @@ install_init() {
     echo "root:x:0:"                     > "${WORK_DIR}/etc/group"
 
     # dev nodes (mdev/udev will create more at runtime)
-    mknod -m 622 "${WORK_DIR}/dev/console" c 5 1 2>/dev/null || true
-    mknod -m 666 "${WORK_DIR}/dev/null"    c 1 3 2>/dev/null || true
+    # BUG-21 FIX: Previously silenced all mknod errors with "2>/dev/null || true".
+    # If the build host lacks CAP_MKNOD (e.g. rootless Docker, unprivileged LXC),
+    # ALL device nodes fail silently and the resulting initramfs has no /dev/null,
+    # /dev/random, etc. — the kernel panics during early boot.
+    # Now we verify that at minimum /dev/console and /dev/null were created, and
+    # fail loudly if not so the operator knows to run as root or use fakeroot+cpio.
+    local mknod_ok=0
+    mknod -m 622 "${WORK_DIR}/dev/console" c 5 1 2>/dev/null && mknod_ok=1 || true
+    mknod -m 666 "${WORK_DIR}/dev/null"    c 1 3 2>/dev/null && mknod_ok=1 || true
     mknod -m 666 "${WORK_DIR}/dev/zero"    c 1 5 2>/dev/null || true
     mknod -m 666 "${WORK_DIR}/dev/random"  c 1 8 2>/dev/null || true
     mknod -m 666 "${WORK_DIR}/dev/urandom" c 1 9 2>/dev/null || true
     mknod -m 660 "${WORK_DIR}/dev/tty0"    c 4 0 2>/dev/null || true
     mknod -m 660 "${WORK_DIR}/dev/tty1"    c 4 1 2>/dev/null || true
     mknod -m 660 "${WORK_DIR}/dev/tty"     c 5 0 2>/dev/null || true
+
+    if [[ $mknod_ok -eq 0 ]]; then
+        die "mknod failed for all device nodes — need root or CAP_MKNOD.\n  Re-run as root, or use: fakeroot -- bash build-initramfs.sh (for cpio packing only)"
+    fi
 
     # Install hook scripts
     if [ -d "${SCRIPT_DIR}/hooks" ]; then

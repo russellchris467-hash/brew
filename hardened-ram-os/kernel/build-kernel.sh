@@ -88,10 +88,13 @@ download_kernel() {
 
     log "Verifying GPG signature..."
     # Import Linus Torvalds and Greg Kroah-Hartman keys
+    # BUG-12 FIX: The old warning said "skipping signature check" but the code below
+    # now die()s on verification failure.  The message was misleading — it implied the
+    # build would continue without checking, when in fact it would abort.  Corrected.
     gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys \
         'ABAF11C65A2970B130ABE3C479BE3E4300411886' \
         '647F28654894E3BD457199BE38DBBDC86092693E' 2>/dev/null || \
-        warn "GPG key import failed — skipping signature check (not recommended for production)"
+        warn "GPG key import failed — signature verification below will also fail and abort the build"
 
     # FIX(HIGH): Previously continued build even when GPG verification failed.
     # A compromised CDN or MITM could deliver a backdoored kernel tarball and the
@@ -172,11 +175,28 @@ configure_kernel() {
         "CONFIG_KEXEC=n"
     )
 
+    # BUG-02 FIX: kconfig represents DISABLED options as "# CONFIG_FOO is not set",
+    # NOT as "CONFIG_FOO=n".  The previous grep "^${key}=" never matched disabled
+    # options, so actual_val was always "NOT_SET" for every =n check (CONFIG_SWAP,
+    # CONFIG_DEVMEM, CONFIG_KEXEC).  The security verification was silently reporting
+    # these critical disabled-by-design options as "missing" — a false negative that
+    # would confuse operators or cause them to think the hardening had been lost.
     local failed=0
     for opt in "${required_options[@]}"; do
         key="${opt%%=*}"
         expected_val="${opt#*=}"
-        actual_val=$(grep "^${key}=" .config 2>/dev/null | cut -d= -f2 || echo "NOT_SET")
+
+        local actual_val
+        if grep -q "^${key}=y$" .config 2>/dev/null; then
+            actual_val="y"
+        elif grep -q "^${key}=[0-9]" .config 2>/dev/null; then
+            actual_val=$(grep "^${key}=" .config | cut -d= -f2)
+        elif grep -q "^# ${key} is not set$" .config 2>/dev/null; then
+            actual_val="n"
+        else
+            actual_val="NOT_SET"
+        fi
+
         if [[ "$actual_val" != "$expected_val" ]]; then
             warn "  MISSING: ${key} (expected ${expected_val}, got ${actual_val})"
             ((failed++)) || true
@@ -197,10 +217,15 @@ build_kernel() {
     local src_dir="$1"
     cd "$src_dir"
 
+    # BUG-18 FIX: Build log was written to world-readable /tmp/kernel-build.log.
+    # On a shared build server any local user could read compiler output, error
+    # messages, and build paths.  Now written to the private BUILD_DIR.
+    local build_log="${BUILD_DIR}/kernel-build.log"
+    log "Build log: ${build_log}"
     log "Building kernel with ${JOBS} jobs (this may take 30-90 minutes)..."
     make -j"$JOBS" ARCH=x86_64 \
         KCFLAGS="-O2 -pipe -fstack-clash-protection -ffunction-sections -fdata-sections" \
-        bzImage modules 2>&1 | tee /tmp/kernel-build.log
+        bzImage modules 2>&1 | tee "${build_log}"
 
     ok "Kernel built successfully"
 }
