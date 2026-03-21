@@ -10,6 +10,8 @@ from .variation_steg import VariationSteg
 from .emoji_cipher import EmojiCipher
 from .regional_encoder import RegionalEncoder
 from .detector import Detector
+from .chainer import chain_encode, chain_decode, METHODS
+from .channel_formatter import format_for_channel, list_channels
 
 __all__ = [
     "ZWCSmuggler",
@@ -17,4 +19,9 @@ __all__ = [
     "EmojiCipher",
     "RegionalEncoder",
     "Detector",
+    "chain_encode",
+    "chain_decode",
+    "METHODS",
+    "format_for_channel",
+    "list_channels",
 ]

@@ -1,0 +1,911 @@
+#!/usr/bin/env python3
+"""
+Hydra Interactive Console - Pentesting REPL
+=============================================
+Full-featured interactive shell for emoji steganography operations.
+
+Features:
+  - Encode/decode with all 4 methods
+  - Multi-layer chaining (stack methods)
+  - File I/O (read payloads from files, write results)
+  - Channel formatting (Slack, Discord, Teams, etc.)
+  - Clipboard integration (copy/paste payloads)
+  - Batch mode (process multiple payloads)
+  - Session workspace ($last, $vars, history)
+  - Pipe support (stdin/stdout)
+
+FOR AUTHORIZED SECURITY TESTING ONLY.
+
+Usage:
+  hydra-interactive                    # enter REPL
+  hydra-interactive --batch file.txt   # batch mode
+  echo "secret" | hydra-interactive -c "encode zwc"  # pipe mode
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import readline
+import shlex
+import shutil
+import subprocess
+import sys
+import textwrap
+import traceback
+
+# Add lib to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from lib.zwc_smuggler import ZWCSmuggler
+from lib.variation_steg import VariationSteg
+from lib.emoji_cipher import EmojiCipher
+from lib.regional_encoder import RegionalEncoder
+from lib.detector import Detector
+from lib.chainer import chain_encode, chain_decode, METHODS
+from lib.channel_formatter import format_for_channel, list_channels, CHANNEL_PROFILES
+
+# ── ANSI colors ──────────────────────────────────────────────────
+RED = '\033[0;31m'
+GREEN = '\033[0;32m'
+YELLOW = '\033[1;33m'
+CYAN = '\033[0;36m'
+MAGENTA = '\033[0;35m'
+BLUE = '\033[0;34m'
+BOLD = '\033[1m'
+DIM = '\033[2m'
+RESET = '\033[0m'
+
+BANNER = rf"""
+{CYAN}  _   _           _
+ | | | |_   _  __| |_ __ __ _
+ | |_| | | | |/ _` | '__/ _` |
+ |  _  | |_| | (_| | | | (_| |
+ |_| |_|\__, |\__,_|_|  \__,_|
+        |___/{RESET}
+  {BOLD}Interactive Pentesting Console{RESET}
+  {DIM}[Authorized Security Testing Only]{RESET}
+"""
+
+HELP_TEXT = f"""
+{BOLD}ENCODING / DECODING{RESET}
+  {GREEN}encode{RESET} <method> <message>     Encode a message (zwc, vs, cipher, regional)
+  {GREEN}decode{RESET} <method> <input>       Decode a payload
+  {GREEN}chain{RESET}  <m1+m2+..> <message>   Multi-layer encode (e.g. cipher+zwc)
+  {GREEN}unchain{RESET} <m1+m2+..> <input>    Multi-layer decode (reverse order)
+
+{BOLD}ANALYSIS / DEFENSE{RESET}
+  {GREEN}scan{RESET} [text]                   Scan for steganography (uses $last if no arg)
+  {GREEN}hexdump{RESET} [text]                Hex dump of text
+  {GREEN}codepoints{RESET} [text]             Unicode codepoint breakdown
+  {GREEN}compare{RESET} <method> <message>    Side-by-side: visible vs raw
+
+{BOLD}FILE I/O{RESET}
+  {GREEN}load{RESET} <file>                   Load text from file into $last
+  {GREEN}save{RESET} <file>                   Save $last to file
+  {GREEN}encode-file{RESET} <method> <file>   Encode file contents
+  {GREEN}decode-file{RESET} <method> <file>   Decode file contents
+
+{BOLD}CHANNELS & DELIVERY{RESET}
+  {GREEN}channel{RESET} <ch> [text]           Format payload for channel (slack, discord, etc.)
+  {GREEN}channels{RESET}                      List available channels and limits
+  {GREEN}profile{RESET} <method> <message>    Show payload stats and size analysis
+
+{BOLD}BATCH OPERATIONS{RESET}
+  {GREEN}batch-encode{RESET} <method> <file>  Encode each line in file
+  {GREEN}batch-decode{RESET} <method> <file>  Decode each line in file
+
+{BOLD}WORKSPACE{RESET}
+  {GREEN}set{RESET} <name> <value>            Set a session variable
+  {GREEN}get{RESET} <name>                    Get a session variable
+  {GREEN}vars{RESET}                          Show all session variables
+  {GREEN}last{RESET}                          Show $last (most recent result)
+  {GREEN}copy{RESET}                          Copy $last to clipboard
+  {GREEN}paste{RESET}                         Paste from clipboard into $last
+  {GREEN}history{RESET}                       Show command history
+
+{BOLD}OPTIONS{RESET}
+  --key <n>                        Set cipher key (default: 42)
+  --cover <emojis>                 Set cover text
+  --noise <0.0-1.0>               Noise ratio for cipher
+  --channel <ch>                   Auto-format for channel
+
+{BOLD}GENERAL{RESET}
+  {GREEN}help{RESET}                          Show this help
+  {GREEN}demo{RESET}                          Quick demo of all methods
+  {GREEN}clear{RESET}                         Clear screen
+  {GREEN}exit{RESET} / {GREEN}quit{RESET} / Ctrl+D           Exit
+"""
+
+
+class HydraConsole:
+    """Interactive pentesting console for Hydra toolkit."""
+
+    def __init__(self):
+        self.last_result: str = ''
+        self.session_vars: dict[str, str] = {}
+        self.cmd_history: list[str] = []
+        self.cipher_key: int = 42
+        self.noise_ratio: float = 0.0
+        self.cover_text: str | None = None
+        self.auto_channel: str | None = None
+        self.detector = Detector()
+        self.running = True
+
+        # Configure readline for in-memory history only
+        readline.set_history_length(500)
+        try:
+            readline.parse_and_bind('tab: complete')
+            readline.set_completer(self._completer)
+        except Exception:
+            pass
+
+    # ── Completer ──────────────────────────────────────────────────
+
+    def _completer(self, text: str, state: int):
+        commands = [
+            'encode', 'decode', 'chain', 'unchain', 'scan', 'hexdump',
+            'codepoints', 'compare', 'load', 'save', 'encode-file',
+            'decode-file', 'channel', 'channels', 'profile',
+            'batch-encode', 'batch-decode', 'set', 'get', 'vars',
+            'last', 'copy', 'paste', 'history', 'help', 'demo',
+            'clear', 'exit', 'quit',
+        ]
+        methods = ['zwc', 'vs', 'cipher', 'regional']
+        options = sorted(set(commands + methods))
+        matches = [o for o in options if o.startswith(text)]
+        if state < len(matches):
+            return matches[state]
+        return None
+
+    # ── Variable resolution ────────────────────────────────────────
+
+    def _resolve(self, text: str | None) -> str:
+        """Resolve $last and $varname references."""
+        if text is None:
+            return self.last_result
+        if text == '$last':
+            return self.last_result
+        if text.startswith('$') and text[1:] in self.session_vars:
+            return self.session_vars[text[1:]]
+        return text
+
+    def _set_last(self, value: str):
+        self.last_result = value
+        self.session_vars['last'] = value
+
+    # ── Output helpers ─────────────────────────────────────────────
+
+    def _out(self, text: str):
+        print(text)
+
+    def _info(self, text: str):
+        print(f"{DIM}{text}{RESET}", file=sys.stderr)
+
+    def _ok(self, text: str):
+        print(f"{GREEN}{text}{RESET}", file=sys.stderr)
+
+    def _warn(self, text: str):
+        print(f"{YELLOW}{text}{RESET}", file=sys.stderr)
+
+    def _err(self, text: str):
+        print(f"{RED}{text}{RESET}", file=sys.stderr)
+
+    # ── Core commands ──────────────────────────────────────────────
+
+    def cmd_encode(self, args: list[str]):
+        if len(args) < 2:
+            self._err("Usage: encode <method> <message>")
+            return
+
+        method, message = args[0], self._resolve(' '.join(args[1:]))
+        kwargs = {'key': self.cipher_key, 'noise': self.noise_ratio, 'cover': self.cover_text}
+
+        if method not in METHODS:
+            self._err(f"Unknown method: {method}. Available: {', '.join(METHODS)}")
+            return
+
+        try:
+            result = METHODS[method]['encode'](message, **kwargs)
+        except Exception as e:
+            self._err(f"Encode error: {e}")
+            return
+
+        self._set_last(result)
+
+        # Auto-format for channel if set
+        if self.auto_channel:
+            ch_result = format_for_channel(result, self.auto_channel)
+            self._out(ch_result['message'])
+            self._info(f"[{ch_result['channel']}] {ch_result['total_length']} chars")
+            if ch_result['warnings']:
+                for w in ch_result['warnings']:
+                    self._warn(f"  WARNING: {w}")
+        else:
+            self._out(result)
+
+        self._info(
+            f"[{method}] {len(message)} chars -> {len(result)} chars "
+            f"({len(result)/max(len(message),1):.1f}x expansion)"
+        )
+
+    def cmd_decode(self, args: list[str]):
+        if len(args) < 1:
+            self._err("Usage: decode <method> [input]")
+            return
+
+        method = args[0]
+        payload = self._resolve(' '.join(args[1:]) if len(args) > 1 else None)
+        kwargs = {'key': self.cipher_key}
+
+        if method not in METHODS:
+            self._err(f"Unknown method: {method}. Available: {', '.join(METHODS)}")
+            return
+
+        try:
+            result = METHODS[method]['decode'](payload, **kwargs)
+        except (ValueError, UnicodeDecodeError) as e:
+            self._err(f"Decode error: {e}")
+            return
+
+        self._set_last(result)
+        self._out(result)
+        self._info(f"[{method}] decoded {len(payload)} chars -> {len(result)} chars")
+
+    def cmd_chain(self, args: list[str]):
+        if len(args) < 2:
+            self._err("Usage: chain <m1+m2+...> <message>")
+            self._err("  Example: chain cipher+zwc \"secret message\"")
+            return
+
+        methods = args[0].split('+')
+        message = self._resolve(' '.join(args[1:]))
+        kwargs = {'key': self.cipher_key, 'noise': self.noise_ratio, 'cover': self.cover_text}
+
+        try:
+            result = chain_encode(message, methods, **kwargs)
+        except Exception as e:
+            self._err(f"Chain error: {e}")
+            return
+
+        self._set_last(result['encoded'])
+
+        if self.auto_channel:
+            ch_result = format_for_channel(result['encoded'], self.auto_channel)
+            self._out(ch_result['message'])
+        else:
+            self._out(result['encoded'])
+
+        self._info(f"Chain: {result['chain']} | Total: {result['total_expansion']}")
+        for step in result['steps']:
+            self._info(f"  {step['method']}: {step['input_len']} -> {step['output_len']} ({step['expansion']})")
+
+    def cmd_unchain(self, args: list[str]):
+        if len(args) < 1:
+            self._err("Usage: unchain <m1+m2+...> [input]")
+            return
+
+        methods = args[0].split('+')
+        payload = self._resolve(' '.join(args[1:]) if len(args) > 1 else None)
+        kwargs = {'key': self.cipher_key}
+
+        try:
+            result = chain_decode(payload, methods, **kwargs)
+        except Exception as e:
+            self._err(f"Unchain error: {e}")
+            return
+
+        self._set_last(result['decoded'])
+        self._out(result['decoded'])
+        self._info(f"Decoded chain (reversed): {result['chain']}")
+
+    def cmd_scan(self, args: list[str]):
+        text = self._resolve(' '.join(args) if args else None)
+        if not text:
+            self._err("Nothing to scan. Encode something first or provide text.")
+            return
+
+        results = self.detector.scan(text, verbose=True)
+        self._out(json.dumps(results, indent=2, ensure_ascii=False))
+
+        n = len(results['methods_detected'])
+        level = results['threat_level']
+        color = {
+            'CLEAN': GREEN, 'LOW': YELLOW, 'MEDIUM': YELLOW, 'HIGH': RED
+        }.get(level, RESET)
+
+        if n == 0:
+            self._info(f"{color}[{level}]{RESET} No steganography detected.")
+        else:
+            self._info(f"{color}[{level}]{RESET} Detected {n} method(s):")
+            for m in results['methods_detected']:
+                self._info(f"  - {m}")
+
+    def cmd_hexdump(self, args: list[str]):
+        text = self._resolve(' '.join(args) if args else None)
+        if not text:
+            self._err("Nothing to dump.")
+            return
+        self._out(self.detector.hexdump(text))
+
+    def cmd_codepoints(self, args: list[str]):
+        text = self._resolve(' '.join(args) if args else None)
+        if not text:
+            self._err("Nothing to dump.")
+            return
+        self._out(self.detector.codepoint_dump(text))
+
+    def cmd_compare(self, args: list[str]):
+        if len(args) < 2:
+            self._err("Usage: compare <method> <message>")
+            return
+
+        method, message = args[0], self._resolve(' '.join(args[1:]))
+        kwargs = {'key': self.cipher_key, 'noise': self.noise_ratio, 'cover': self.cover_text}
+
+        if method not in METHODS:
+            self._err(f"Unknown method: {method}")
+            return
+
+        try:
+            encoded = METHODS[method]['encode'](message, **kwargs)
+        except Exception as e:
+            self._err(f"Error: {e}")
+            return
+
+        self._set_last(encoded)
+
+        self._out(f"\n{BOLD}Original:{RESET}  {message}")
+        self._out(f"{BOLD}Encoded:{RESET}   {encoded}")
+        self._out(f"{BOLD}Visible:{RESET}   {self.detector._strip_invisible(encoded)}")
+        self._out(f"")
+
+        scan = self.detector.scan(encoded, verbose=False)
+        self._out(f"{BOLD}Stats:{RESET}")
+        self._out(f"  Input length:     {len(message)} chars")
+        self._out(f"  Output length:    {len(encoded)} chars")
+        self._out(f"  Invisible chars:  {scan['invisible_chars']}")
+        self._out(f"  Invisible ratio:  {scan['invisible_ratio']:.1%}")
+        self._out(f"  Threat level:     {scan['threat_level']}")
+        self._out(f"  Methods detected: {', '.join(scan['methods_detected']) or 'none'}")
+        self._out(f"")
+        self._out(f"{BOLD}Codepoints (first 30 chars):{RESET}")
+        self._out(self.detector.codepoint_dump(encoded[:30]))
+
+    # ── File I/O ───────────────────────────────────────────────────
+
+    def cmd_load(self, args: list[str]):
+        if not args:
+            self._err("Usage: load <file>")
+            return
+        filepath = args[0]
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+            self._set_last(content)
+            self._ok(f"Loaded {len(content)} chars from {filepath}")
+        except Exception as e:
+            self._err(f"Load error: {e}")
+
+    def cmd_save(self, args: list[str]):
+        if not args:
+            self._err("Usage: save <file>")
+            return
+        if not self.last_result:
+            self._err("Nothing to save. $last is empty.")
+            return
+        filepath = args[0]
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(self.last_result)
+            self._ok(f"Saved {len(self.last_result)} chars to {filepath}")
+        except Exception as e:
+            self._err(f"Save error: {e}")
+
+    def cmd_encode_file(self, args: list[str]):
+        if len(args) < 2:
+            self._err("Usage: encode-file <method> <file>")
+            return
+        method, filepath = args[0], args[1]
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception as e:
+            self._err(f"Read error: {e}")
+            return
+        self.cmd_encode([method, content])
+
+    def cmd_decode_file(self, args: list[str]):
+        if len(args) < 2:
+            self._err("Usage: decode-file <method> <file>")
+            return
+        method, filepath = args[0], args[1]
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception as e:
+            self._err(f"Read error: {e}")
+            return
+        self.cmd_decode([method, content])
+
+    # ── Channel formatting ─────────────────────────────────────────
+
+    def cmd_channel(self, args: list[str]):
+        if not args:
+            self._err("Usage: channel <channel-name> [text]")
+            self._err(f"  Available: {', '.join(CHANNEL_PROFILES)}")
+            return
+
+        ch = args[0]
+        text = self._resolve(' '.join(args[1:]) if len(args) > 1 else None)
+        if not text:
+            self._err("Nothing to format. Encode something first or provide text.")
+            return
+
+        try:
+            result = format_for_channel(text, ch)
+        except ValueError as e:
+            self._err(str(e))
+            return
+
+        self._set_last(result['message'])
+        self._out(result['message'])
+        self._info(f"[{result['channel']}] {result['total_length']} chars "
+                    f"(payload: {result['payload_length']}, cover: {result['cover_length']})")
+        if result['warnings']:
+            for w in result['warnings']:
+                self._warn(f"  WARNING: {w}")
+
+    def cmd_channels(self, _args: list[str]):
+        channels = list_channels()
+        self._out(f"\n{BOLD}Available Delivery Channels:{RESET}\n")
+        for ch in channels:
+            limit = ch['max_length'] or 'unlimited'
+            self._out(f"  {GREEN}{ch['id']:10s}{RESET}  {ch['name']:22s}  max: {limit}")
+            self._out(f"  {DIM}{'':10s}  {ch['notes']}{RESET}")
+
+    def cmd_profile(self, args: list[str]):
+        if len(args) < 2:
+            self._err("Usage: profile <method> <message>")
+            return
+
+        method, message = args[0], self._resolve(' '.join(args[1:]))
+        kwargs = {'key': self.cipher_key, 'noise': self.noise_ratio, 'cover': self.cover_text}
+
+        if method not in METHODS:
+            self._err(f"Unknown method: {method}")
+            return
+
+        try:
+            encoded = METHODS[method]['encode'](message, **kwargs)
+        except Exception as e:
+            self._err(f"Error: {e}")
+            return
+
+        self._out(f"\n{BOLD}Payload Profile: {method}{RESET}")
+        self._out(f"  Input:        {len(message)} chars / {len(message.encode('utf-8'))} bytes")
+        self._out(f"  Encoded:      {len(encoded)} chars / {len(encoded.encode('utf-8'))} bytes")
+        expansion = len(encoded) / max(len(message), 1)
+        self._out(f"  Expansion:    {expansion:.1f}x (chars) / "
+                  f"{len(encoded.encode('utf-8'))/max(len(message.encode('utf-8')),1):.1f}x (bytes)")
+        self._out(f"")
+        self._out(f"  {BOLD}Channel Fit:{RESET}")
+        for ch_id, profile in CHANNEL_PROFILES.items():
+            limit = profile['max_length']
+            if limit is None:
+                status = f"{GREEN}OK{RESET}"
+            elif len(encoded) <= limit:
+                pct = len(encoded) / limit * 100
+                status = f"{GREEN}OK{RESET} ({pct:.0f}% of limit)"
+            else:
+                status = f"{RED}EXCEEDS{RESET} ({len(encoded)}/{limit})"
+            self._out(f"    {ch_id:10s}  {status}")
+
+        self._set_last(encoded)
+
+    # ── Batch operations ───────────────────────────────────────────
+
+    def cmd_batch_encode(self, args: list[str]):
+        if len(args) < 2:
+            self._err("Usage: batch-encode <method> <file>")
+            return
+        method, filepath = args[0], args[1]
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                lines = [l.rstrip('\n') for l in f if l.strip()]
+        except Exception as e:
+            self._err(f"Read error: {e}")
+            return
+
+        kwargs = {'key': self.cipher_key, 'noise': self.noise_ratio, 'cover': self.cover_text}
+        results = []
+        for i, line in enumerate(lines):
+            try:
+                encoded = METHODS[method]['encode'](line, **kwargs)
+                results.append(encoded)
+                self._out(encoded)
+            except Exception as e:
+                self._err(f"Line {i+1} error: {e}")
+                results.append(f"ERROR: {e}")
+
+        self._info(f"Batch encoded {len(results)} lines with {method}")
+        self._set_last('\n'.join(results))
+
+    def cmd_batch_decode(self, args: list[str]):
+        if len(args) < 2:
+            self._err("Usage: batch-decode <method> <file>")
+            return
+        method, filepath = args[0], args[1]
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                lines = [l.rstrip('\n') for l in f if l.strip()]
+        except Exception as e:
+            self._err(f"Read error: {e}")
+            return
+
+        kwargs = {'key': self.cipher_key}
+        results = []
+        for i, line in enumerate(lines):
+            try:
+                decoded = METHODS[method]['decode'](line, **kwargs)
+                results.append(decoded)
+                self._out(decoded)
+            except Exception as e:
+                self._err(f"Line {i+1} error: {e}")
+                results.append(f"ERROR: {e}")
+
+        self._info(f"Batch decoded {len(results)} lines with {method}")
+        self._set_last('\n'.join(results))
+
+    # ── Workspace commands ─────────────────────────────────────────
+
+    def cmd_set(self, args: list[str]):
+        if len(args) < 2:
+            self._err("Usage: set <name> <value>")
+            return
+
+        name = args[0]
+        value = ' '.join(args[1:])
+
+        # Handle special settings
+        if name == 'key':
+            try:
+                self.cipher_key = int(value)
+                self._ok(f"Cipher key set to {self.cipher_key}")
+            except ValueError:
+                self._err("Key must be an integer.")
+            return
+        elif name == 'noise':
+            try:
+                self.noise_ratio = float(value)
+                self._ok(f"Noise ratio set to {self.noise_ratio}")
+            except ValueError:
+                self._err("Noise must be a float (0.0-1.0).")
+            return
+        elif name == 'cover':
+            if value.lower() == 'none':
+                self.cover_text = None
+                self._ok("Cover text cleared (using auto-generated).")
+            else:
+                self.cover_text = value
+                self._ok(f"Cover text set to: {value}")
+            return
+        elif name == 'channel':
+            if value.lower() == 'none':
+                self.auto_channel = None
+                self._ok("Auto-channel cleared.")
+            elif value in CHANNEL_PROFILES:
+                self.auto_channel = value
+                self._ok(f"Auto-channel set to: {value}")
+            else:
+                self._err(f"Unknown channel: {value}. Available: {', '.join(CHANNEL_PROFILES)}")
+            return
+
+        self.session_vars[name] = value
+        self._ok(f"${name} = {value}")
+
+    def cmd_get(self, args: list[str]):
+        if not args:
+            self._err("Usage: get <name>")
+            return
+        name = args[0]
+        if name in self.session_vars:
+            self._out(self.session_vars[name])
+        else:
+            self._err(f"Variable ${name} not set.")
+
+    def cmd_vars(self, _args: list[str]):
+        self._out(f"\n{BOLD}Session Variables:{RESET}")
+        self._out(f"  key     = {self.cipher_key}")
+        self._out(f"  noise   = {self.noise_ratio}")
+        self._out(f"  cover   = {self.cover_text or '(auto)'}")
+        self._out(f"  channel = {self.auto_channel or '(none)'}")
+        self._out(f"  $last   = {repr(self.last_result[:80]) + '...' if len(self.last_result) > 80 else repr(self.last_result)}")
+        if self.session_vars:
+            self._out(f"\n  {BOLD}Custom:{RESET}")
+            for k, v in self.session_vars.items():
+                if k != 'last':
+                    display = repr(v[:60]) + '...' if len(v) > 60 else repr(v)
+                    self._out(f"  ${k} = {display}")
+
+    def cmd_last(self, _args: list[str]):
+        if self.last_result:
+            self._out(self.last_result)
+            self._info(f"({len(self.last_result)} chars / {len(self.last_result.encode('utf-8'))} bytes)")
+        else:
+            self._warn("$last is empty.")
+
+    def cmd_copy(self, _args: list[str]):
+        if not self.last_result:
+            self._err("Nothing to copy. $last is empty.")
+            return
+
+        copied = False
+        # Try multiple clipboard tools
+        for cmd in ['xclip -selection clipboard', 'xsel --clipboard --input',
+                     'pbcopy', 'wl-copy']:
+            prog = cmd.split()[0]
+            if shutil.which(prog):
+                try:
+                    proc = subprocess.run(
+                        cmd.split(), input=self.last_result.encode('utf-8'),
+                        timeout=5, capture_output=True,
+                    )
+                    if proc.returncode == 0:
+                        self._ok(f"Copied {len(self.last_result)} chars to clipboard (via {prog})")
+                        copied = True
+                        break
+                except Exception:
+                    continue
+
+        if not copied:
+            self._warn("No clipboard tool found (xclip, xsel, pbcopy, wl-copy).")
+            self._warn("Use 'save <file>' instead, or pipe: hydra-interactive -c 'encode ...' > out.txt")
+
+    def cmd_paste(self, _args: list[str]):
+        pasted = False
+        for cmd in ['xclip -selection clipboard -o', 'xsel --clipboard --output',
+                     'pbpaste', 'wl-paste']:
+            prog = cmd.split()[0]
+            if shutil.which(prog):
+                try:
+                    proc = subprocess.run(
+                        cmd.split(), capture_output=True, timeout=5,
+                    )
+                    if proc.returncode == 0:
+                        content = proc.stdout.decode('utf-8')
+                        self._set_last(content)
+                        self._ok(f"Pasted {len(content)} chars from clipboard into $last")
+                        pasted = True
+                        break
+                except Exception:
+                    continue
+
+        if not pasted:
+            self._warn("No clipboard tool found.")
+
+    def cmd_history(self, _args: list[str]):
+        if not self.cmd_history:
+            self._warn("No commands in history yet.")
+            return
+        for i, cmd in enumerate(self.cmd_history):
+            self._out(f"  {i+1:4d}  {cmd}")
+
+    def cmd_demo(self, _args: list[str]):
+        secret = "Hello, Hydra!"
+        self._out(f"\n{BOLD}Quick Demo{RESET} - encoding \"{secret}\" with all methods:\n")
+
+        for method_name, method in METHODS.items():
+            kwargs = {'key': self.cipher_key, 'noise': 0.0, 'cover': None}
+            try:
+                encoded = method['encode'](secret, **kwargs)
+                decoded = method['decode'](encoded, **kwargs)
+                status = f"{GREEN}PASS{RESET}" if decoded == secret else f"{RED}FAIL{RESET}"
+                self._out(f"  [{status}] {method_name:10s}  {len(encoded):4d} chars  {encoded[:50]}{'...' if len(encoded) > 50 else ''}")
+            except Exception as e:
+                self._out(f"  [{RED}ERR{RESET}]  {method_name:10s}  {e}")
+
+        self._out(f"\n  {DIM}Use 'compare <method> <message>' for detailed analysis{RESET}\n")
+
+    # ── Command dispatch ───────────────────────────────────────────
+
+    COMMANDS = {
+        'encode': 'cmd_encode',
+        'decode': 'cmd_decode',
+        'chain': 'cmd_chain',
+        'unchain': 'cmd_unchain',
+        'scan': 'cmd_scan',
+        'hexdump': 'cmd_hexdump',
+        'codepoints': 'cmd_codepoints',
+        'compare': 'cmd_compare',
+        'load': 'cmd_load',
+        'save': 'cmd_save',
+        'encode-file': 'cmd_encode_file',
+        'decode-file': 'cmd_decode_file',
+        'channel': 'cmd_channel',
+        'channels': 'cmd_channels',
+        'profile': 'cmd_profile',
+        'batch-encode': 'cmd_batch_encode',
+        'batch-decode': 'cmd_batch_decode',
+        'set': 'cmd_set',
+        'get': 'cmd_get',
+        'vars': 'cmd_vars',
+        'last': 'cmd_last',
+        'copy': 'cmd_copy',
+        'paste': 'cmd_paste',
+        'history': 'cmd_history',
+        'demo': 'cmd_demo',
+        'help': None,
+        'clear': None,
+        'exit': None,
+        'quit': None,
+    }
+
+    def dispatch(self, line: str) -> bool:
+        """Parse and dispatch a command line. Returns False to exit."""
+        line = line.strip()
+        if not line or line.startswith('#'):
+            return True
+
+        self.cmd_history.append(line)
+
+        # Parse with shlex for proper quoting
+        try:
+            tokens = shlex.split(line)
+        except ValueError:
+            tokens = line.split()
+
+        cmd = tokens[0].lower()
+        args = tokens[1:]
+
+        # Inline option parsing: extract --key, --noise, --cover, --channel
+        cleaned_args = []
+        i = 0
+        while i < len(args):
+            if args[i] == '--key' and i + 1 < len(args):
+                try:
+                    self.cipher_key = int(args[i + 1])
+                except ValueError:
+                    self._err(f"Invalid key: {args[i+1]}")
+                i += 2
+            elif args[i] == '--noise' and i + 1 < len(args):
+                try:
+                    self.noise_ratio = float(args[i + 1])
+                except ValueError:
+                    self._err(f"Invalid noise: {args[i+1]}")
+                i += 2
+            elif args[i] == '--cover' and i + 1 < len(args):
+                self.cover_text = args[i + 1]
+                i += 2
+            elif args[i] == '--channel' and i + 1 < len(args):
+                self.auto_channel = args[i + 1]
+                i += 2
+            else:
+                cleaned_args.append(args[i])
+                i += 1
+
+        args = cleaned_args
+
+        if cmd in ('exit', 'quit'):
+            return False
+        elif cmd == 'help':
+            self._out(HELP_TEXT)
+            return True
+        elif cmd == 'clear':
+            os.system('clear' if os.name != 'nt' else 'cls')
+            return True
+        elif cmd in self.COMMANDS:
+            method = getattr(self, self.COMMANDS[cmd])
+            try:
+                method(args)
+            except KeyboardInterrupt:
+                self._warn("\nInterrupted.")
+            except Exception as e:
+                self._err(f"Error: {e}")
+                self._err(traceback.format_exc())
+            return True
+        else:
+            self._err(f"Unknown command: {cmd}. Type 'help' for commands.")
+            return True
+
+    # ── REPL loop ──────────────────────────────────────────────────
+
+    def run(self):
+        """Main REPL loop."""
+        print(BANNER)
+        self._info("Type 'help' for commands, 'demo' for a quick demo, 'exit' to quit.\n")
+
+        while self.running:
+            try:
+                prompt = f"{MAGENTA}hydra{RESET}"
+                if self.auto_channel:
+                    prompt += f"{DIM}@{self.auto_channel}{RESET}"
+                prompt += f" {BOLD}>{RESET} "
+
+                line = input(prompt)
+                if not self.dispatch(line):
+                    break
+
+            except KeyboardInterrupt:
+                print()
+                continue
+            except EOFError:
+                print()
+                break
+
+        self._info("Session ended. No artifacts written to disk.")
+
+    # ── Non-interactive modes ──────────────────────────────────────
+
+    def run_command(self, command: str):
+        """Execute a single command (for pipe mode)."""
+        self.dispatch(command)
+
+    def run_batch(self, filepath: str):
+        """Execute commands from a batch file."""
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        except Exception as e:
+            self._err(f"Cannot read batch file: {e}")
+            return
+
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            self._info(f"[{i+1}] {line}")
+            if not self.dispatch(line):
+                break
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Hydra Interactive Pentesting Console",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        '-c', '--command',
+        help='Execute a single command and exit',
+    )
+    parser.add_argument(
+        '--batch',
+        help='Execute commands from a batch file',
+    )
+    parser.add_argument(
+        '--key', type=int, default=42,
+        help='Initial cipher key (default: 42)',
+    )
+    parser.add_argument(
+        '--channel',
+        help='Auto-format output for channel (slack, discord, etc.)',
+    )
+
+    args = parser.parse_args()
+
+    console = HydraConsole()
+    console.cipher_key = args.key
+    if args.channel:
+        if args.channel in CHANNEL_PROFILES:
+            console.auto_channel = args.channel
+        else:
+            print(f"Unknown channel: {args.channel}", file=sys.stderr)
+            sys.exit(1)
+
+    # Check if stdin has piped data
+    if not sys.stdin.isatty() and args.command:
+        piped_input = sys.stdin.read().strip()
+        if piped_input:
+            console._set_last(piped_input)
+
+    if args.command:
+        console.run_command(args.command)
+    elif args.batch:
+        console.run_batch(args.batch)
+    else:
+        console.run()
+
+
+if __name__ == '__main__':
+    main()
