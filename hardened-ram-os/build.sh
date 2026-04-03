@@ -45,6 +45,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ---------------------------------------------------------------------------
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; MAGENTA='\033[0;35m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+# FIND-13 FIX: Only emit ANSI colour codes when stdout is an interactive terminal.
+# In CI pipelines or when output is redirected to a log file, escape sequences
+# appear as literal garbage and break grep/awk analysis of build output.
+if [[ ! -t 1 ]]; then
+    RED=''; GREEN=''; YELLOW=''; BLUE=''; MAGENTA=''; CYAN=''; BOLD=''; NC=''
+fi
 log()     { echo -e "${BLUE}[*]${NC} $*"; }
 ok()      { echo -e "${GREEN}[+]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[!]${NC} $*"; }
@@ -118,7 +124,11 @@ export_env() {
     export KERNEL_MOD_DIR="${OUTPUT_DIR}/modules/lib/modules/${KERNEL_VERSION}-hardened"
     export SQUASH_OUTPUT="${OUTPUT_DIR}/live/filesystem.squashfs"
 
+    # FIND-6 FIX: OUTPUT_DIR was created with the default umask (0022), making
+    # kernel images, squashfs, and signing artifacts world-readable on shared
+    # build servers.  Any local user could read the produced ISO or kernel.
     mkdir -p "$OUTPUT_DIR"
+    chmod 700 "$OUTPUT_DIR"
 }
 
 # ---------------------------------------------------------------------------

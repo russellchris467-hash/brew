@@ -84,11 +84,16 @@ write_grub_config() {
         grub_password_line="password_pbkdf2 admin ${GRUB_ADMIN_HASH}"
         log "GRUB admin password hash set"
     else
-        warn "GRUB_ADMIN_HASH not set — boot menu entries will NOT be password-protected."
-        warn "Anyone with physical access can edit kernel parameters (e.g. disable apparmor, toram)."
-        warn "Generate a hash: grub-mkpasswd-pbkdf2 | grep -oP 'grub\\.pbkdf2\\S+'"
-        warn "Then re-run with: GRUB_ADMIN_HASH=<hash> ./build-iso.sh"
-        grub_password_line="# WARNING: no password set — boot entries are unprotected"
+        # FIND-12 FIX: A warning alone is insufficient for a security-critical setting.
+        # Previously a developer who missed the warning would ship ISOs with fully
+        # unprotected GRUB menus (anyone can edit kernel params: disable apparmor,
+        # toram=0, init=/bin/sh, etc.).  Now the build aborts unless the operator
+        # explicitly acknowledges the risk with ALLOW_NO_GRUB_PASSWORD=1.
+        if [[ "${ALLOW_NO_GRUB_PASSWORD:-0}" != "1" ]]; then
+            die "GRUB_ADMIN_HASH is not set.\n\n  Generate a hash:\n    grub-mkpasswd-pbkdf2 | grep -oP 'grub\\.pbkdf2\\S+'\n\n  Then build:\n    GRUB_ADMIN_HASH='<hash>' ./build-iso.sh\n\n  For testing only (insecure):\n    ALLOW_NO_GRUB_PASSWORD=1 ./build-iso.sh"
+        fi
+        warn "ALLOW_NO_GRUB_PASSWORD=1 set — GRUB entries are UNPROTECTED (testing only)"
+        grub_password_line="# WARNING: no password — TESTING BUILD ONLY — not for production"
     fi
 
     cat > "${ISO_WORK}/boot/grub/grub.cfg" << GRUB_EOF
@@ -183,6 +188,28 @@ build_iso() {
         -V "HARDENED-RAMOS" \
         -publisher "Hardened RAM-OS Project" \
         -appid "HARDENED-RAMOS-$(date +%Y%m%d)" 2>&1 | tail -5
+
+    # FIND-5 FIX: grub-mkrescue can exit 0 while producing a truncated or empty
+    # ISO if xorriso has an internal error mid-write.  Verify the output is
+    # plausibly complete before declaring success.
+    [[ -f "$ISO_OUTPUT" ]] || die "ISO output file was not created at ${ISO_OUTPUT}"
+
+    local iso_bytes
+    iso_bytes=$(stat -c%s "$ISO_OUTPUT" 2>/dev/null || echo 0)
+    if [[ "$iso_bytes" -lt 104857600 ]]; then   # < 100 MiB is implausibly small
+        die "ISO is suspiciously small (${iso_bytes} bytes — expected >100MB).\n  The grub-mkrescue step likely failed silently."
+    fi
+
+    # Verify essential components are present inside the ISO image
+    if command -v isoinfo &>/dev/null; then
+        local iso_listing
+        iso_listing=$(isoinfo -i "$ISO_OUTPUT" -f 2>/dev/null | tr '[:lower:]' '[:upper:]')
+        for expected in '/BOOT/VMLINUZ' '/BOOT/INITRD.IMG' '/LIVE/FILESYSTEM.SQUASHFS'; do
+            echo "$iso_listing" | grep -qF "$expected" || \
+                warn "Expected component not found in ISO: ${expected}"
+        done
+        ok "ISO contents spot-checked"
+    fi
 
     local size
     size=$(du -sh "$ISO_OUTPUT" | cut -f1)

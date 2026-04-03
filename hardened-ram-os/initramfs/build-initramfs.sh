@@ -62,9 +62,13 @@ copy_binaries() {
     # Core busybox provides: sh, mount, umount, switch_root, mdev, etc.
     if command -v busybox &>/dev/null; then
         cp "$(command -v busybox)" "${WORK_DIR}/bin/busybox"
-        # Install busybox applets
-        chroot "$WORK_DIR" /bin/busybox --install -s /bin/ 2>/dev/null || \
-            "${WORK_DIR}/bin/busybox" --install -s "${WORK_DIR}/bin/" 2>/dev/null || true
+        # FIND-23 FIX: `chroot $WORK_DIR /bin/busybox --install` always fails here
+        # because the chroot environment has no kernel mounts (/proc, /sys, /dev)
+        # set up at this build stage.  The chroot returns a non-zero exit code and
+        # the fallback direct invocation does the actual work.  Removed the dead
+        # chroot attempt so the intent is clear and no misleading error is printed.
+        "${WORK_DIR}/bin/busybox" --install -s "${WORK_DIR}/bin/" 2>/dev/null || \
+            warn "busybox --install failed; applets may be missing from initramfs"
     else
         warn "busybox not found — install with: apt-get install busybox-static"
         # Fall back to copying individual binaries

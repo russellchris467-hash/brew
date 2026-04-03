@@ -39,7 +39,13 @@ echo 3 > /proc/sys/kernel/printk
 # Helper: log with timestamp
 # ---------------------------------------------------------------------------
 log() {
-    echo "[$(cut -d' ' -f1 /proc/uptime)] $*"
+    # FIND-20 FIX: /proc/uptime may not exist on all early-boot configurations.
+    # Guard the read so log() works even before /proc is fully populated.
+    if [ -r /proc/uptime ]; then
+        echo "[$(cut -d' ' -f1 /proc/uptime)] $*"
+    else
+        echo "[boot] $*"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -105,8 +111,12 @@ find_boot_device() {
                 continue
             fi
 
-            # Ensure mount point is clean before each attempt
-            umount "$mnt" 2>/dev/null || true
+            # FIND-8 FIX: Plain `umount` fails if anything still holds the mount
+            # point open (e.g. a background find still traversing it), leaving the
+            # device mounted and the next attempt silently mount-stacking on top.
+            # `umount -l` (lazy) marks the mount for release once all file handles
+            # close, guaranteeing the path is free for the next iteration.
+            umount -l "$mnt" 2>/dev/null || true
 
             if mount -o ro "$dev" "$mnt" 2>/dev/null; then
                 if [ -f "${mnt}/live/${LIVE_IMAGE_NAME}" ]; then
@@ -153,6 +163,19 @@ if [ "$TORAM" = "1" ]; then
     SQUASH_SIZE=$(stat -c%s "$SQUASH_SRC" 2>/dev/null || echo 0)
     log "  Image size: $((SQUASH_SIZE / 1024 / 1024)) MiB"
 
+    # FIND-27 FIX: tmpfs is capped at 90% of RAM.  If the squashfs is larger than
+    # available tmpfs space the cp will fail mid-write with a cryptic "No space left
+    # on device" error, leaving a partial file that will fail integrity checks.
+    # Check available space explicitly and abort with a clear message.
+    AVAIL_BYTES=$(df -B1 --output=avail /ram_store 2>/dev/null | tail -1 | tr -d ' ' || echo 0)
+    if [ "$SQUASH_SIZE" -gt "$AVAIL_BYTES" ]; then
+        log "ERROR: squashfs is $((SQUASH_SIZE / 1024 / 1024)) MiB but only $((AVAIL_BYTES / 1024 / 1024)) MiB available in RAM."
+        log "  This system needs more RAM, or build a smaller squashfs image."
+        log "  Use toram=0 as a fallback (not fully amnesiac)."
+        (sleep 10; poweroff -f) &
+        exec /bin/false
+    fi
+
     cp "$SQUASH_SRC" /ram_store/filesystem.squashfs
     ok_src="/ram_store/filesystem.squashfs"
 
@@ -167,7 +190,13 @@ fi
 # ---------------------------------------------------------------------------
 # Verify squashfs integrity (SHA256)
 # ---------------------------------------------------------------------------
-BOOT_CHKFILE="${SQUASH_SRC%.squashfs}.sha256"
+# FIND-9 FIX: SQUASH_SRC is a path we constructed via string operations from
+# a mount point we control, but the target *filesystem* on that device could
+# contain symlinks.  If `filesystem.squashfs` is a symlink to an attacker-
+# crafted path, the .sha256 lookup would follow it and verify the wrong hash.
+# Resolve to the canonical real path before computing any derived paths.
+SQUASH_SRC_REAL=$(readlink -f "$SQUASH_SRC" 2>/dev/null || echo "$SQUASH_SRC")
+BOOT_CHKFILE="${SQUASH_SRC_REAL%.squashfs}.sha256"
 
 # FIX(HIGH): Previously booted silently when no checksum file was present.
 # An attacker replacing the squashfs but omitting the .sha256 file would bypass
@@ -183,6 +212,11 @@ if [ -f "$BOOT_CHKFILE" ]; then
     log "Verifying squashfs integrity..."
     EXPECTED_HASH=$(cut -d' ' -f1 "$BOOT_CHKFILE")
     ACTUAL_HASH=$(sha256sum "$ok_src" 2>/dev/null | cut -d' ' -f1)
+    # Ensure hash string is non-empty and looks like a SHA256 hex digest
+    case "$ACTUAL_HASH" in
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) : ;;
+        *) ACTUAL_HASH="" ;;
+    esac
 
     if [ -n "$ACTUAL_HASH" ] && [ "$ACTUAL_HASH" = "$EXPECTED_HASH" ]; then
         log "Integrity check PASSED (SHA256: ${ACTUAL_HASH})"
@@ -220,7 +254,10 @@ log "Setting up amnesiac OverlayFS..."
 
 mkdir -p "$OVERLAY_UPPER" "$OVERLAY_WORK" "$NEWROOT"
 
-mount -t tmpfs -o size=80%,mode=0755 tmpfs /overlay_rw
+# FIND-17 FIX: mode=0755 made the OverlayFS upper layer world-readable,
+# allowing any user to inspect another user's modified files via the raw
+# tmpfs mount point.  mode=0700 restricts access to root only.
+mount -t tmpfs -o size=80%,mode=0700 tmpfs /overlay_rw
 mkdir -p "${OVERLAY_UPPER}/upper" "${OVERLAY_UPPER}/work"
 
 mount -t overlay overlay \
@@ -260,9 +297,20 @@ cat > "$WIPE_SCRIPT" << 'WIPE_EOF'
 # amnesiac-wipe — Zero-wipe sensitive RAM content on shutdown
 # Called by systemd as a shutdown service (Before=umount.target)
 PASSES="${AMNESIAC_WIPE_PASSES:-3}"
-log() { echo "[amnesiac-wipe] $*"; logger -t amnesiac-wipe "$*"; }
+log() { echo "[amnesiac-wipe] $*"; logger -t amnesiac-wipe "$*" 2>/dev/null || true; }
 
-log "Initiating secure RAM wipe (${PASSES} passes)..."
+# FIND-3 FIX: Without signal handlers the wipe could be interrupted by a
+# SIGINT/SIGTERM from an impatient user or from systemd's kill timeout, leaving
+# partial data un-wiped in RAM.  Ignore all interruption signals for the
+# duration of the wipe so it always runs to completion.
+trap '' INT TERM HUP QUIT
+
+# FIND-18 FIX: shred may not be installed on all minimal systems.
+# Detect once and set a flag used by wipe_path() below.
+HAVE_SHRED=0
+command -v shred >/dev/null 2>&1 && HAVE_SHRED=1
+
+log "Initiating secure RAM wipe (${PASSES} passes, shred=${HAVE_SHRED})..."
 
 # Sync all filesystem buffers
 sync
@@ -297,10 +345,19 @@ wipe_path() {
     [ -e "$target" ] || return 0
     log "Wiping ${target}..."
     if [ -f "$target" ]; then
-        shred -vzn "$PASSES" "$target" 2>/dev/null || dd if=/dev/zero of="$target" 2>/dev/null || true
+        # FIND-18 FIX: use shred only if available; always dd as fallback
+        if [ "$HAVE_SHRED" = "1" ]; then
+            shred -vzn "$PASSES" "$target" 2>/dev/null || true
+        fi
+        dd if=/dev/zero of="$target" bs=4096 2>/dev/null || true
         rm -f "$target"
     elif [ -d "$target" ]; then
-        find "$target" -type f -exec shred -vzn "$PASSES" {} \; 2>/dev/null || true
+        if [ "$HAVE_SHRED" = "1" ]; then
+            find "$target" -type f -exec shred -vzn "$PASSES" {} \; 2>/dev/null || true
+        else
+            find "$target" -type f -exec sh -c \
+                'dd if=/dev/zero of="$1" bs=4096 2>/dev/null || true' _ {} \; 2>/dev/null || true
+        fi
         rm -rf "$target"
     fi
 }

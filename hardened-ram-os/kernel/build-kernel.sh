@@ -220,7 +220,10 @@ build_kernel() {
     # BUG-18 FIX: Build log was written to world-readable /tmp/kernel-build.log.
     # On a shared build server any local user could read compiler output, error
     # messages, and build paths.  Now written to the private BUILD_DIR.
+    # FIND-11 FIX: Even in BUILD_DIR, the log file inherits the process umask
+    # (typically 0022) making it world-readable.  Pre-create it with mode 0600.
     local build_log="${BUILD_DIR}/kernel-build.log"
+    install -m 600 /dev/null "${build_log}"
     log "Build log: ${build_log}"
     log "Building kernel with ${JOBS} jobs (this may take 30-90 minutes)..."
     make -j"$JOBS" ARCH=x86_64 \

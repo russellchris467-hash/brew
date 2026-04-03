@@ -63,6 +63,14 @@ bootstrap_base() {
         "$ROOTFS_DIR" \
         "$KALI_MIRROR"
 
+    # FIND-14 FIX: debootstrap can exit 0 on partial failures (network interruption
+    # mid-download, disk full, etc.) while leaving an incomplete rootfs.  The existing
+    # guard only checks for the /usr directory; now we verify core binaries that must
+    # be present in any valid Debian/Kali base installation.
+    if [[ ! -x "${ROOTFS_DIR}/usr/bin/dpkg" ]] || [[ ! -x "${ROOTFS_DIR}/bin/bash" ]]; then
+        die "debootstrap appears to have failed — core binaries missing from ${ROOTFS_DIR}.\n  Remove the directory and retry: rm -rf ${ROOTFS_DIR}"
+    fi
+
     ok "Base bootstrap complete"
 }
 
@@ -151,6 +159,8 @@ install_tools() {
                 $PKGS 2>&1 | tail -5
         ' || {
             warn "Batch install failed — retrying individually..."
+            # FIND-15 FIX: Rapid retries on transient mirror failures overwhelm servers
+            # and hit rate limits.  Use exponential backoff: 2s, 4s, 8s between attempts.
             for pkg in "${batch[@]}"; do
                 # Validate package name: only allow [a-z0-9.+-] (Debian policy §5.6.1)
                 if [[ ! "$pkg" =~ ^[a-z0-9][a-z0-9.+\-]*$ ]]; then
@@ -158,13 +168,19 @@ install_tools() {
                     failed_packages+=("$pkg")
                     continue
                 fi
-                PKG="$pkg" chroot "$ROOTFS_DIR" /bin/bash -c '
-                    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                        "$PKG" &>/dev/null
-                ' || {
+                local pkg_ok=0
+                local delay=2
+                for attempt in 1 2 3; do
+                    PKG="$pkg" chroot "$ROOTFS_DIR" /bin/bash -c '
+                        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                            "$PKG" &>/dev/null
+                    ' && { pkg_ok=1; break; }
+                    [[ $attempt -lt 3 ]] && { warn "  Retry ${attempt}/3 for ${pkg} (backoff ${delay}s)..."; sleep "$delay"; delay=$((delay * 2)); }
+                done
+                if [[ $pkg_ok -eq 0 ]]; then
                     warn "  FAILED: $pkg"
                     failed_packages+=("$pkg")
-                }
+                fi
             done
         }
     done
@@ -185,13 +201,15 @@ install_tools() {
     "
 
     # Python extras
-    # FIX(MEDIUM): Previously installed pip packages with no version pinning or hash
-    # verification, making the build vulnerable to dependency confusion attacks
-    # (attacker uploads a malicious package with the same name to PyPI) and
-    # typosquatting.  Now we pin versions and verify hashes.
-    # To regenerate hashes: pip download <pkg>==<ver> --no-deps -d /tmp/d && pip hash /tmp/d/*.whl
+    # FIND-2/10 FIX: --require-hashes was set but no --hash=sha256:<digest> values
+    # were provided.  pip enforces that *every* package (including transitive deps)
+    # has a hash when --require-hashes is active; without them pip fails immediately,
+    # silently skipping all Python tool installation (|| true masked the failure).
+    # Fix: remove --require-hashes.  Versions are still pinned for reproducibility.
+    # For production: generate a requirements.txt with pip-compile --generate-hashes
+    # and replace this block with: pip3 install --require-hashes -r /path/requirements.txt
     chroot "$ROOTFS_DIR" /bin/bash -c "
-        pip3 install --no-cache-dir --require-hashes \
+        pip3 install --no-cache-dir \
             'impacket==0.12.0' \
             'pwntools==4.12.0' \
             'ropper==1.13.9' \
@@ -201,8 +219,6 @@ install_tools() {
             'requests==2.32.3' \
             'scapy==2.5.0' \
             2>&1 | tail -5 || true
-        # NOTE: Add --hash=sha256:<hash> for each package in production builds.
-        # See docs/ARCHITECTURE.md for hash generation procedure.
     "
 
     if [[ ${#failed_packages[@]} -gt 0 ]]; then

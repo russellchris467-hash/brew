@@ -160,7 +160,12 @@ PC4_EOF
     # ------------------------------------------------------------------
     log "Configuring nftables transparent proxy..."
     local tor_uid
-    tor_uid=$(chroot "${rootfs}" id -u "${TOR_UID_NAME}" 2>/dev/null || echo "")
+    tor_uid=$(chroot "${rootfs}" id -u "${TOR_UID_NAME}" 2>/dev/null || true)
+    # FIND-16 FIX: An empty tor_uid produces "define TOR_UID  =" in the nftables
+    # configuration, which is a syntax error.  nft will refuse to load the ruleset,
+    # leaving ALL traffic unredirected (no Tor enforcement at all).
+    # Die immediately rather than ship a broken firewall config.
+    [[ -n "$tor_uid" ]] || die "Could not determine UID for '${TOR_UID_NAME}' in rootfs.\n  Ensure Tor is installed before calling configure_tor_proxy()."
 
     cat > "${rootfs}/etc/nftables-tor.conf" << NFTEOF
 #!/usr/sbin/nft -f
@@ -174,13 +179,22 @@ PC4_EOF
 #
 # This prevents direct clearnet connections (IP leaks).
 # Tor's own traffic is exempted by UID match.
+#
+# FIND-19 FIX: IPv4-only rules left IPv6 traffic completely unredirected —
+# any IPv6-capable application could bypass the transparent proxy and make
+# direct clearnet connections.  Added matching ip6 tables to block/redirect
+# IPv6 traffic.  Since Tor's TransPort only supports IPv4, IPv6 non-loopback
+# output is rejected outright (fail-closed for IPv6 clearnet).
 
 flush ruleset
 
-define TOR_UID  = ${tor_uid:-107}
+define TOR_UID        = ${tor_uid}
 define TOR_TRANS_PORT = 9040
 define TOR_DNS_PORT   = 5353
 
+# ---------------------------------------------------------------------------
+# IPv4 rules
+# ---------------------------------------------------------------------------
 table ip nat {
     chain output {
         type nat hook output priority -100; policy accept;
@@ -215,6 +229,28 @@ table ip filter {
         # Block direct clearnet TCP (belt-and-suspenders after NAT redirect)
         # Uncomment for strict mode (breaks LAN services):
         # ip daddr != 127.0.0.0/8 meta l4proto tcp reject
+    }
+}
+
+# ---------------------------------------------------------------------------
+# IPv6 rules — Tor TransPort is IPv4-only, so block all non-loopback IPv6
+# output to prevent clearnet bypasses via IPv6.
+# ---------------------------------------------------------------------------
+table ip6 filter {
+    chain output {
+        type filter hook output priority 0; policy accept;
+
+        # Exempt Tor daemon (its IPv6 DNS lookups go to system resolver)
+        meta skuid \$TOR_UID accept
+
+        # Allow loopback
+        ip6 daddr ::1 accept
+
+        # Allow link-local (required for IPv6 ND, router discovery)
+        ip6 daddr fe80::/10 accept
+
+        # Reject all other IPv6 to prevent transparent proxy bypass
+        reject with icmpv6 type no-route
     }
 }
 NFTEOF
