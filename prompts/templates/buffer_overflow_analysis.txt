@@ -1,0 +1,65 @@
+# Buffer Overflow Vulnerability Analysis Request
+
+## Context
+I am analyzing a potentially vulnerable binary for security research and bug bounty purposes.
+
+## Binary Information
+- **File**: {{BINARY_PATH}}
+- **Architecture**: {{ARCH}}
+- **File Type**: {{FILE_TYPE}}
+- **Size**: {{SIZE}}
+
+## Security Features Analysis
+```
+RELRO:        {{RELRO_STATUS}}
+Stack Canary: {{CANARY_STATUS}}
+NX:           {{NX_STATUS}}
+PIE:          {{PIE_STATUS}}
+FORTIFY:      {{FORTIFY_STATUS}}
+```
+
+## Vulnerable Function Disassembly
+```assembly
+{{DISASSEMBLY}}
+```
+
+## Identified Strings
+```
+{{INTERESTING_STRINGS}}
+```
+
+## Analysis Request
+
+Please analyze this binary and help me understand:
+
+### 1. Vulnerability Identification
+- Is there a buffer overflow vulnerability present?
+- Where exactly is the vulnerable code?
+- What is the vulnerable function call? (strcpy, gets, sprintf, etc.)
+
+### 2. Stack Layout Analysis
+- What is the buffer size?
+- Calculate the offset from buffer start to return address
+- Show the stack layout diagram
+
+### 3. Exploitation Strategy
+Given the security mitigations present:
+- What exploitation technique should I use?
+- Do I need information leaks?
+- What bypass techniques are required?
+
+### 4. Payload Construction
+- Provide step-by-step payload construction
+- Show the memory layout after overflow
+- Calculate exact offsets
+
+### 5. Proof of Concept
+If possible, provide a basic exploit skeleton in Python (pwntools format)
+
+## Focus Areas
+- Precise offset calculations
+- Return address overwrite mechanics
+- Mitigation bypass strategies
+- Reliable exploitation techniques
+
+Please provide detailed technical analysis with specific addresses, offsets, and actionable exploitation steps.
