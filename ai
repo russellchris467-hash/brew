@@ -1,0 +1,93 @@
+#!/bin/bash
+# AI Module CLI - Quick access to AI prompt generation
+# Usage: ai <command> <binary> [args]
+
+# Load AI module
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/ai_module.sh" 2>/dev/null || {
+    echo "Error: AI module not found"
+    exit 1
+}
+
+# Show usage
+show_usage() {
+    cat << 'EOF'
+AI Module CLI - Bug Bounty AI Prompt Generator
+
+Usage:
+  ai analyze <binary>              Generate vulnerability analysis prompt
+  ai rop <binary> [goal]          Generate ROP chain strategy prompt
+  ai reverse <binary> [function]   Generate reverse engineering prompt
+  ai custom <binary> <focus> <q>   Generate custom analysis prompt
+
+  ai info                          Show module information
+  ai help                          Show this help
+
+Examples:
+  ai analyze ./vuln_program
+  ai rop ./target "call system"
+  ai reverse ./binary main
+  ai custom ./app "heap exploitation" "How to exploit|What mitigations"
+
+Quick Workflow:
+  1. ai analyze <binary>           # Get comprehensive analysis prompt
+  2. Copy the output
+  3. Paste into ChatGPT/Claude
+  4. Get detailed security analysis!
+
+Output:
+  Prompts are saved to: /tmp/ai_prompts/
+  Use 'ls -lt /tmp/ai_prompts/' to view recent prompts
+
+EOF
+}
+
+# Main command dispatcher
+case "${1:-help}" in
+    analyze|a)
+        if [ -z "$2" ]; then
+            echo "Usage: ai analyze <binary>"
+            exit 1
+        fi
+        ai_analyze "$2"
+        ;;
+
+    rop|r)
+        if [ -z "$2" ]; then
+            echo "Usage: ai rop <binary> [goal]"
+            exit 1
+        fi
+        ai_rop "$2" "${3:-Execute code}"
+        ;;
+
+    reverse|rev|re)
+        if [ -z "$2" ]; then
+            echo "Usage: ai reverse <binary> [function]"
+            exit 1
+        fi
+        ai_reverse "$2" "${3:-main}"
+        ;;
+
+    custom|c)
+        if [ -z "$2" ] || [ -z "$3" ] || [ -z "$4" ]; then
+            echo "Usage: ai custom <binary> <focus> <questions>"
+            echo "Example: ai custom ./app 'heap' 'How to exploit|What protections'"
+            exit 1
+        fi
+        ai_custom "$2" "$3" "$4"
+        ;;
+
+    info|i)
+        ai_module_info
+        ;;
+
+    help|h|-h|--help)
+        show_usage
+        ;;
+
+    *)
+        echo "Unknown command: $1"
+        echo "Run 'ai help' for usage"
+        exit 1
+        ;;
+esac
