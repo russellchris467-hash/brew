@@ -1,0 +1,23 @@
+{
+  "timestamp": "2026-01-19 01:20:20 +0000",
+  "platform": "Linux",
+  "findings": {
+    "virtualized": true,
+    "cpu_features": [
+      "vmx"
+    ],
+    "virtual_devices": [
+
+    ],
+    "shared_memory": [
+
+    ],
+    "paravirt": [
+
+    ],
+    "security": {
+      "smep": true,
+      "smap": true
+    }
+  }
+}

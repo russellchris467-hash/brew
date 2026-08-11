@@ -1,0 +1,71 @@
+# ROP Chain Construction Assistance
+
+## Target Binary Analysis
+- **Binary**: {{BINARY_PATH}}
+- **Architecture**: {{ARCH}}
+- **Base Address**: {{BASE_ADDR}}
+
+## Security Mitigations
+```
+PIE:     {{PIE_STATUS}}
+NX:      {{NX_STATUS}}
+RELRO:   {{RELRO_STATUS}}
+Canary:  {{CANARY_STATUS}}
+```
+
+## Available ROP Gadgets
+```
+{{ROP_GADGETS}}
+```
+
+## Available Functions
+```
+{{FUNCTIONS}}
+```
+
+## Goal
+Construct a ROP chain to achieve: **{{GOAL}}**
+
+## Constraints
+- NX is enabled (stack is not executable)
+- {{ADDITIONAL_CONSTRAINTS}}
+
+## ROP Chain Construction Request
+
+Please help me build an effective ROP chain:
+
+### 1. Gadget Selection
+- Identify the most useful gadgets from the list above
+- Explain why each gadget is chosen
+- Note any special considerations
+
+### 2. Chain Design
+- Design the complete ROP chain
+- Show the stack layout
+- Calculate necessary offsets
+
+### 3. Register Management
+- How to set up required registers (rdi, rsi, rdx, etc.)?
+- Handle function calling conventions
+- Manage stack alignment
+
+### 4. Implementation
+Provide the ROP chain in Python (pwntools):
+```python
+from pwn import *
+
+# Your ROP chain here
+```
+
+### 5. Execution Flow
+- Explain step-by-step execution
+- What happens at each gadget?
+- Final payload structure
+
+## Additional Considerations
+- Gadget reliability and side effects
+- Memory alignment requirements
+- ASLR bypass if needed
+- Alternative chains if primary fails
+
+Please provide a complete, working ROP chain with detailed explanations.

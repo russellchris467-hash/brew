@@ -1,0 +1,79 @@
+# Reverse Engineering Analysis Request
+
+## Binary Context
+- **File**: {{BINARY_PATH}}
+- **Type**: {{FILE_TYPE}}
+- **Architecture**: {{ARCH}}
+- **Stripped**: {{SYMBOLS_STATUS}}
+- **Function Count**: {{FUNCTION_COUNT}}
+
+## Target Function Analysis
+
+### Function: {{FUNCTION_NAME}}
+```assembly
+{{FUNCTION_DISASSEMBLY}}
+```
+
+## Context Clues
+
+### Interesting Strings Found
+```
+{{INTERESTING_STRINGS}}
+```
+
+### Imported Functions
+```
+{{IMPORTED_FUNCTIONS}}
+```
+
+### Cross References
+```
+{{CROSS_REFERENCES}}
+```
+
+## Reverse Engineering Request
+
+Please help me understand this binary function:
+
+### 1. Function Purpose
+- What is the primary purpose of this function?
+- What problem does it solve?
+- Is it a standard algorithm or custom code?
+
+### 2. Algorithm Identification
+- Can you identify the algorithm being used?
+- Are there any recognizable patterns (crypto, compression, parsing)?
+- Compare to known implementations
+
+### 3. High-Level Pseudocode
+Provide readable pseudocode that represents this function's logic:
+```python
+# Your pseudocode here
+```
+
+### 4. Input/Output Analysis
+- What inputs does this function expect?
+- What does it return?
+- What are the side effects?
+
+### 5. Control Flow
+- Explain the main logic flow
+- Identify loops, conditionals, function calls
+- Note any complex branching
+
+### 6. Security Analysis
+- Are there vulnerabilities in this function?
+- Buffer overflows, integer overflows, format strings?
+- Potential exploitation vectors?
+
+### 7. Anti-Analysis Techniques
+- Any obfuscation present?
+- Anti-debugging checks?
+- Code packing or encryption?
+
+## Additional Analysis
+- Suggest debugging strategies
+- Recommend where to set breakpoints
+- Identify key values to monitor
+
+Please provide detailed technical analysis that helps me fully understand this function's behavior and identify potential security issues.
